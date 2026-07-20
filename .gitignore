@@ -24,6 +24,11 @@ data/*.sqlite
 data/*.sqlite3
 work/
 
+# Local planning and handoff notes
+meeting-implementation-summary.md
+psop-interface-handoff.md
+需求方案.md
+
 # Logs and temporary files
 *.log
 *.tmp
