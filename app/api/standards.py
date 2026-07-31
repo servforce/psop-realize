@@ -16,8 +16,9 @@ from sqlalchemy import select
 
 from app.db.session import SessionLocal
 from app.core.config import settings
-from app.models.entities import CallLog, Standard, StandardMaterializeJob
+from app.models.entities import CallLog, Standard, StandardCrawlItem, StandardCrawlJob, StandardMaterializeJob
 from app.services.audit import finish_call, logged_call
+from app.services.openstd_crawl import openstd_crawl_service
 from app.services.standards import MARKDOWN_KINDS, standard_markdown_object_key, standard_service
 
 router = APIRouter(prefix="/api/standards", tags=["standards"])
@@ -126,6 +127,48 @@ def search_history(limit: int = 0):
             statement = statement.limit(max(1, min(limit, 1000)))
         rows = session.scalars(statement).all()
         return [search_log_to_dict(row) for row in rows]
+
+
+@router.post("/openstd/crawl")
+def create_openstd_crawl_job(background_tasks: BackgroundTasks):
+    with SessionLocal() as session:
+        with logged_call(session, interface_type="rest", tool_or_endpoint="POST /api/standards/openstd/crawl") as call_id:
+            result = openstd_crawl_service.create_job(session)
+            if result.get("created") or result.get("status") in {"queued", "running"}:
+                background_tasks.add_task(run_openstd_crawl_job, result["id"])
+            finish_call(session, call_id, result)
+            return result
+
+
+@router.get("/openstd/crawl/latest")
+def get_latest_openstd_crawl_job():
+    with SessionLocal() as session:
+        result = openstd_crawl_service.latest_job(session)
+        if result is None:
+            return {"status": "none"}
+        return result
+
+
+@router.get("/openstd/crawl/{job_id}")
+def get_openstd_crawl_job(job_id: str):
+    with SessionLocal() as session:
+        job = session.get(StandardCrawlJob, job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="openstd crawl job not found")
+        return openstd_crawl_service.job_to_dict(session, job)
+
+
+@router.get("/openstd/crawl/{job_id}/items")
+def list_openstd_crawl_items(job_id: str, status: str = Query("", alias="status"), limit: int = 100):
+    with SessionLocal() as session:
+        job = session.get(StandardCrawlJob, job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="openstd crawl job not found")
+        statement = select(StandardCrawlItem).where(StandardCrawlItem.job_id == job_id)
+        if status:
+            statement = statement.where(StandardCrawlItem.status == status)
+        statement = statement.order_by(StandardCrawlItem.created_at.desc()).limit(max(1, min(limit, 500)))
+        return [openstd_crawl_service.item_to_dict(item) for item in session.scalars(statement).all()]
 
 
 @router.get("/{standard_id}")
@@ -320,6 +363,18 @@ def run_standard_materialize_job(standard_id: str, job_id: str) -> None:
             standard_id=standard_id,
         ) as call_id:
             result = standard_service.materialize(session, standard_id, job_id=job_id)
+            finish_call(session, call_id, result)
+
+
+def run_openstd_crawl_job(job_id: str) -> None:
+    with SessionLocal() as session:
+        with logged_call(
+            session,
+            interface_type="background",
+            tool_or_endpoint="openstd_crawl_job",
+            request={"job_id": job_id},
+        ) as call_id:
+            result = openstd_crawl_service.run_job(session, job_id)
             finish_call(session, call_id, result)
 
 

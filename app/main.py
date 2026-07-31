@@ -49,8 +49,7 @@ def create_app() -> FastAPI:
 
     @app.get("/api/objects/{object_key:path}")
     def object_proxy(object_key: str):
-        bucket = settings.object_store_bucket if settings.storage_backend == "minio" else "local"
-        content = storage_service.get_bytes(bucket=bucket, object_key=object_key)
+        content = storage_service.get_bytes(bucket=settings.object_store_bucket, object_key=object_key)
         media_type = "application/octet-stream"
         if object_key.endswith(".jpg"):
             media_type = "image/jpeg"

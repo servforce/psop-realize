@@ -27,9 +27,17 @@ class VideoJob(Base):
     size_bytes: Mapped[int] = mapped_column(Integer, default=0)
     source_bucket: Mapped[str] = mapped_column(String(255), default="")
     source_object_key: Mapped[str] = mapped_column(String(1024), default="")
+    analysis_video_bucket: Mapped[str] = mapped_column(String(255), default="")
+    analysis_video_object_key: Mapped[str] = mapped_column(String(1024), default="")
+    analysis_video_codec: Mapped[str] = mapped_column(String(64), default="")
+    analysis_video_height: Mapped[int] = mapped_column(Integer, default=0)
+    analysis_video_size_bytes: Mapped[int] = mapped_column(Integer, default=0)
     status: Mapped[str] = mapped_column(String(64), default="queued", index=True)
     progress_percent: Mapped[int] = mapped_column(Integer, default=0)
     current_stage: Mapped[str] = mapped_column(String(128), default="uploaded")
+    stage_processed: Mapped[int] = mapped_column(Integer, default=0)
+    stage_total: Mapped[int] = mapped_column(Integer, default=0)
+    stage_message: Mapped[str] = mapped_column(String(255), default="")
     duration_ms: Mapped[int] = mapped_column(Integer, default=0)
     frame_count: Mapped[int] = mapped_column(Integer, default=0)
     audio_temp_path: Mapped[str | None] = mapped_column(String(1024), nullable=True)
@@ -109,6 +117,56 @@ class StandardMaterializeJob(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class StandardCrawlJob(Base):
+    __tablename__ = "standard_crawl_jobs"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    source_site: Mapped[str] = mapped_column(String(255), default="openstd.samr.gov.cn")
+    source_url: Mapped[str] = mapped_column(String(2048), default="")
+    crawl_scope: Mapped[str] = mapped_column(String(128), default="gbz_guidance")
+    status: Mapped[str] = mapped_column(String(64), default="queued", index=True)
+    total_pages: Mapped[int] = mapped_column(Integer, default=0)
+    current_page: Mapped[int] = mapped_column(Integer, default=0)
+    total_discovered: Mapped[int] = mapped_column(Integer, default=0)
+    total_downloadable: Mapped[int] = mapped_column(Integer, default=0)
+    uploaded_count: Mapped[int] = mapped_column(Integer, default=0)
+    skipped_duplicate_count: Mapped[int] = mapped_column(Integer, default=0)
+    skipped_unavailable_count: Mapped[int] = mapped_column(Integer, default=0)
+    failed_count: Mapped[int] = mapped_column(Integer, default=0)
+    current_item: Mapped[str] = mapped_column(String(512), default="")
+    error_message: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class StandardCrawlItem(Base):
+    __tablename__ = "standard_crawl_items"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    job_id: Mapped[str] = mapped_column(String(64), index=True)
+    standard_id: Mapped[str] = mapped_column(String(128), default="", index=True)
+    standard_code: Mapped[str] = mapped_column(String(128), default="", index=True)
+    standard_name: Mapped[str] = mapped_column(String(512), default="")
+    standard_status: Mapped[str] = mapped_column(String(64), default="")
+    publish_date: Mapped[str] = mapped_column(String(64), default="")
+    source_scope: Mapped[str] = mapped_column(String(128), default="")
+    source_label: Mapped[str] = mapped_column(String(128), default="")
+    source_url: Mapped[str] = mapped_column(String(2048), default="")
+    detail_url: Mapped[str] = mapped_column(String(2048), default="")
+    download_url: Mapped[str] = mapped_column(String(2048), default="")
+    download_method: Mapped[str] = mapped_column(String(64), default="")
+    status: Mapped[str] = mapped_column(String(64), default="discovered", index=True)
+    skip_reason: Mapped[str] = mapped_column(String(255), default="")
+    error_message: Mapped[str] = mapped_column(Text, default="")
+    retry_count: Mapped[int] = mapped_column(Integer, default=0)
+    source_pdf_bucket: Mapped[str] = mapped_column(String(255), default="")
+    source_pdf_object_key: Mapped[str] = mapped_column(String(1024), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
 
 class StandardMatch(Base):

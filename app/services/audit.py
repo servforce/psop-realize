@@ -13,7 +13,7 @@ from app.models.entities import CallLog
 
 
 def default_caller() -> str:
-    return settings.mcp_client_id or settings.mcp_user or settings.mcp_api_key or "anonymous"
+    return settings.mcp_client_id or "anonymous"
 
 
 def summarize(value: object, *, max_chars: int = 1000) -> str:

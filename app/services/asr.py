@@ -48,9 +48,9 @@ class LocalAsrClient:
             },
         ) as (audit_session, call_id):
             payload = self._post_with_retries(path=path, media_type=media_type, language=language)
-            text = extract_text(payload)
+            text = extract_text(payload) or extract_sentences_text(payload)
             if not text:
-                raise LocalAsrError("Local ASR response did not include transcript text")
+                raise LocalAsrError("Local ASR response did not include sentence-level transcript text")
             raw_language = payload.get("language")
             result_language = str(raw_language).strip() if raw_language else language
             finish_call(
@@ -106,6 +106,20 @@ def extract_text(payload: dict[str, Any]) -> str:
             if isinstance(content, str):
                 return content.strip()
     return ""
+
+
+def extract_sentences_text(payload: dict[str, Any]) -> str:
+    sentences = payload.get("sentences")
+    if not isinstance(sentences, list):
+        return ""
+    parts = []
+    for item in sentences:
+        if not isinstance(item, dict):
+            continue
+        text = str(item.get("text") or item.get("transcript") or item.get("sentence") or "").strip()
+        if text:
+            parts.append(text)
+    return "".join(parts).strip()
 
 
 local_asr_client = LocalAsrClient()

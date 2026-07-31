@@ -181,9 +181,10 @@ WIREFRAME_TIMEOUT_SECONDS=900
 VIDEO_FRAME_SELECTION_ENABLED=true
 VIDEO_FRAME_SELECTION_GROUP_SIZE=8
 VIDEO_FRAME_SELECTION_MAX_SELECTED_FRAMES=24
+VIDEO_MAX_VISUAL_OPERATIONS_PER_SECTION=3
 ```
 
-视频一键解析顺序为：先抽取候选关键帧，再生成 ASR/结构化转写，然后基于结构化转写筛选关键帧并生成线框图，最后生成 Markdown。`VIDEO_FRAME_SELECTION_GROUP_SIZE` 只控制每次送入视觉模型的候选帧批量；`VIDEO_FRAME_SELECTION_MAX_SELECTED_FRAMES` 控制所有批次汇总后最多保留多少张入选帧。
+视频一键解析顺序为：先抽取候选关键帧，再生成 ASR/结构化转写，然后基于结构化转写筛选关键帧并生成线框图，最后生成 Markdown。`VIDEO_FRAME_SELECTION_GROUP_SIZE` 只控制每次送入视觉模型的候选帧批量；`VIDEO_FRAME_SELECTION_MAX_SELECTED_FRAMES` 控制所有批次汇总后最多保留多少张入选帧；`VIDEO_MAX_VISUAL_OPERATIONS_PER_SECTION` 控制每个文本段落最多提取几个需要配图的关键操作。
 
 prompt 也已经随项目内置：
 

@@ -23,20 +23,15 @@ class StorageService:
 
     def upload_bytes(self, *, object_key: str, content: bytes, media_type: str, bucket: str | None = None) -> StoredObject:
         checksum = hashlib.sha256(content).hexdigest()
-        if self.settings.storage_backend == "minio":
-            target_bucket = bucket or self.settings.object_store_bucket
-            self._put_minio(
-                bucket=target_bucket,
-                object_key=object_key,
-                content=content,
-                media_type=media_type,
-                checksum=checksum,
-            )
-        else:
-            path = self._local_path(object_key)
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(content)
-            target_bucket = "local"
+        self._ensure_minio_backend()
+        target_bucket = bucket or self.settings.object_store_bucket
+        self._put_minio(
+            bucket=target_bucket,
+            object_key=object_key,
+            content=content,
+            media_type=media_type,
+            checksum=checksum,
+        )
         return StoredObject(
             bucket=target_bucket,
             object_key=object_key,
@@ -46,33 +41,54 @@ class StorageService:
         )
 
     def upload_file(self, *, object_key: str, path: Path, media_type: str, bucket: str | None = None) -> StoredObject:
-        return self.upload_bytes(object_key=object_key, content=path.read_bytes(), media_type=media_type, bucket=bucket)
+        checksum = hashlib.sha256()
+        size_bytes = 0
+        with path.open("rb") as file:
+            while True:
+                chunk = file.read(1024 * 1024)
+                if not chunk:
+                    break
+                checksum.update(chunk)
+                size_bytes += len(chunk)
+        self._ensure_minio_backend()
+        target_bucket = bucket or self.settings.object_store_bucket
+        self._put_file(
+            bucket=target_bucket,
+            object_key=object_key,
+            path=path,
+            media_type=media_type,
+            checksum=checksum.hexdigest(),
+        )
+        return StoredObject(
+            bucket=target_bucket,
+            object_key=object_key,
+            media_type=media_type,
+            size_bytes=size_bytes,
+            checksum=checksum.hexdigest(),
+        )
 
     def download_file(self, *, bucket: str, object_key: str, path: Path) -> None:
+        self._ensure_minio_backend()
         path.parent.mkdir(parents=True, exist_ok=True)
-        if self.settings.storage_backend == "minio" and bucket != "local":
-            self._get_client().download_file(bucket, object_key, str(path))
-            return
-        path.write_bytes(self._local_path(object_key).read_bytes())
+        self._get_client().download_file(bucket, object_key, str(path))
 
     def get_bytes(self, *, bucket: str, object_key: str) -> bytes:
-        if self.settings.storage_backend == "minio" and bucket != "local":
-            response = self._get_client().get_object(Bucket=bucket, Key=object_key)
-            body = response.get("Body")
-            if body is None:
-                return b""
-            try:
-                return body.read()
-            finally:
-                body.close()
-        return self._local_path(object_key).read_bytes()
+        self._ensure_minio_backend()
+        response = self._get_client().get_object(Bucket=bucket, Key=object_key)
+        body = response.get("Body")
+        if body is None:
+            return b""
+        try:
+            return body.read()
+        finally:
+            body.close()
 
     def url_for(self, object_key: str) -> str:
         return f"/api/objects/{object_key}"
 
-    def _local_path(self, object_key: str) -> Path:
-        safe_key = object_key.replace("\\", "/").lstrip("/")
-        return Path(self.settings.local_storage_root) / safe_key
+    def _ensure_minio_backend(self) -> None:
+        if self.settings.storage_backend != "minio":
+            raise ValueError("Only STORAGE_BACKEND=minio is supported.")
 
     def _put_minio(self, *, bucket: str, object_key: str, content: bytes, media_type: str, checksum: str) -> None:
         client = self._get_client()
@@ -84,6 +100,18 @@ class StorageService:
             ContentType=media_type,
             Metadata={"sha256": checksum},
         )
+
+    def _put_file(self, *, bucket: str, object_key: str, path: Path, media_type: str, checksum: str) -> None:
+        client = self._get_client()
+        self._ensure_bucket(client, bucket)
+        with path.open("rb") as file:
+            client.put_object(
+                Bucket=bucket,
+                Key=object_key,
+                Body=file,
+                ContentType=media_type,
+                Metadata={"sha256": checksum},
+            )
 
     def _get_client(self):
         if self._client is None:

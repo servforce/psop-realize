@@ -1319,11 +1319,4 @@ class StandardService:
         session.commit()
         return saved_count
 
-    def _resolve_source_pdf(self, standard: Standard) -> Path:
-        local = Path(settings.local_storage_root) / standard.source_pdf_object_key
-        if local.exists():
-            return local
-        raise FileNotFoundError(f"Cannot find source PDF for {standard.id}")
-
-
 standard_service = StandardService()

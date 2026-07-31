@@ -99,7 +99,14 @@ class WireframeService:
                 str(settings.wireframe_timeout_seconds),
                 "--overwrite",
             ]
+            if settings.model_dashscope_base_url:
+                command.extend(["--base-url", settings.model_dashscope_base_url])
             env = os.environ.copy()
+            if settings.model_api_key:
+                env.setdefault("MODEL_API_KEY", settings.model_api_key)
+                env.setdefault("DASHSCOPE_API_KEY", settings.model_api_key)
+            if settings.model_dashscope_base_url:
+                env.setdefault("MODEL_DASHSCOPE_BASE_URL", settings.model_dashscope_base_url)
             with logged_call_with_session(
                 interface_type="model",
                 tool_or_endpoint="qwen.image.wireframe",

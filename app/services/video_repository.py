@@ -77,9 +77,17 @@ class VideoJobRepository:
         status: str | None = None,
         stage: str | None = None,
         progress: int | None = None,
+        stage_processed: int | None = None,
+        stage_total: int | None = None,
+        stage_message: str | None = None,
         error_message: str | None = None,
         duration_ms: int | None = None,
         frame_count: int | None = None,
+        analysis_video_bucket: str | None = None,
+        analysis_video_object_key: str | None = None,
+        analysis_video_codec: str | None = None,
+        analysis_video_height: int | None = None,
+        analysis_video_size_bytes: int | None = None,
         audio_temp_path: str | None = None,
         transcript_object_key: str | None = None,
         markdown_object_key: str | None = None,
@@ -94,12 +102,28 @@ class VideoJobRepository:
             job.current_stage = stage
         if progress is not None:
             job.progress_percent = max(0, min(100, int(progress)))
+        if stage_processed is not None:
+            job.stage_processed = max(0, int(stage_processed))
+        if stage_total is not None:
+            job.stage_total = max(0, int(stage_total))
+        if stage_message is not None:
+            job.stage_message = stage_message[:255]
         if error_message is not None:
             job.error_message = error_message
         if duration_ms is not None:
             job.duration_ms = int(duration_ms)
         if frame_count is not None:
             job.frame_count = int(frame_count)
+        if analysis_video_bucket is not None:
+            job.analysis_video_bucket = analysis_video_bucket
+        if analysis_video_object_key is not None:
+            job.analysis_video_object_key = analysis_video_object_key
+        if analysis_video_codec is not None:
+            job.analysis_video_codec = analysis_video_codec
+        if analysis_video_height is not None:
+            job.analysis_video_height = int(analysis_video_height)
+        if analysis_video_size_bytes is not None:
+            job.analysis_video_size_bytes = int(analysis_video_size_bytes)
         if audio_temp_path is not None:
             job.audio_temp_path = audio_temp_path
         if transcript_object_key is not None:

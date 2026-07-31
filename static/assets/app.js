@@ -12,7 +12,7 @@
   activeStandardSearchView: "home",
   selectedVideoId: null,
   activeVideoView: "directory",
-  activeVideoTab: "frames",
+  activeVideoTab: "transcript",
   videoSearchText: "",
   videoSortOrder: "desc",
   videoLatestUploadActive: false,
@@ -21,6 +21,8 @@
   videoStatusPoll: null,
   wireframeJobPoll: null,
   standardMaterializePoll: null,
+  openstdCrawlPoll: null,
+  openstdCrawlJob: null,
   logRefreshTimer: null,
   logRefreshInFlight: false,
 };
@@ -29,8 +31,12 @@ const stageText = {
   uploaded: "已上传到 MinIO，等待解析",
   downloading_source: "正在从 MinIO 读取源视频",
   probing_video: "正在分析视频信息",
-  extracting_keyframes: "正在使用本地 FFmpeg 抽取关键帧",
-  generating_wireframes: "正在筛选关键帧并生成线框图",
+  preparing_analysis_proxy: "正在生成 720P H.265 解析代理视频",
+  extracting_keyframes: "正在使用本地 FFmpeg 抽取候选业务帧",
+  filtering_frames: "正在进行关键操作时间窗内图像质量过滤",
+  deduplicating_frames: "正在进行 HSV+pHash 去重",
+  semantic_matching: "正在调用 qwen3-vl-embedding 进行语义匹配",
+  generating_wireframes: "正在筛选业务帧并生成线框图",
   transcribing: "正在调用本地 ASR 模型进行原始转写",
   transcribing_asr: "正在调用本地 ASR 模型进行原始转写",
   structuring_transcript: "正在调用 qwen3.7-plus 生成语义结构化转写",
@@ -69,6 +75,7 @@ document.querySelectorAll(".sidebar button").forEach((button) => {
     }
     if (viewId === "standards") {
       setStandardWorkspaceView("directory");
+      loadLatestOpenstdCrawl();
     }
     if (viewId === "standardSearch") {
       setStandardSearchWorkspaceView("home");
@@ -129,6 +136,7 @@ document.getElementById("standardLatestUpload").addEventListener("click", () => 
   updateStandardSortButton();
   renderStandardList();
 });
+document.getElementById("startOpenstdCrawl")?.addEventListener("click", startOpenstdCrawl);
 document.getElementById("rebuildStandardIndex").addEventListener("click", rebuildStandardIndex);
 document.getElementById("searchStandards").addEventListener("click", () => searchStandards("standardSearchText"));
 document.getElementById("searchStandardsFromResult")?.addEventListener("click", () => searchStandards("standardSearchResultText"));
@@ -326,7 +334,7 @@ window.showVideo = async (id) => {
   const changedVideo = state.selectedVideoId !== id;
   state.selectedVideoId = id;
   setVideoWorkspaceView("analysis");
-  if (changedVideo) state.activeVideoTab = "frames";
+  if (changedVideo) state.activeVideoTab = "transcript";
   renderVideoList();
   const video = await fetchJson(`/api/videos/${id}`);
   updateVideoInState(video);
@@ -364,14 +372,14 @@ function renderVideoShell(video) {
     <div class="analysis-actions">
       <div class="primary-analysis-action">
         <button onclick="parseVideo('${video.id}', 'full')">一键解析视频</button>
-        <span>按关键帧、转写文本、关键帧筛选/线框图、Markdown 顺序完成解析。</span>
+        <span>按转写文本、抽取候选业务帧/语义帧、线框图、Markdown 顺序完成解析。</span>
       </div>
       <div class="analysis-section-label">单步解析</div>
       <div class="step-analysis-actions" aria-label="单步解析">
-        <button onclick="parseVideo('${video.id}', 'keyframes')">解析关键帧</button>
-        <button onclick="parseVideo('${video.id}', 'transcript')">转写文本</button>
-        <button id="generateVideoWireframes" onclick="parseVideo('${video.id}', 'wireframes')">筛选关键帧/生成线框图</button>
-        <button onclick="parseVideo('${video.id}', 'markdown')">生成 Markdown</button>
+        <button onclick="parseVideo('${video.id}', 'transcript')">转写文本（包括结构化文本）</button>
+        <button onclick="parseVideo('${video.id}', 'keyframes')">抽取候选业务帧/语义帧</button>
+        <button id="generateVideoWireframes" onclick="parseVideo('${video.id}', 'wireframes')">转为线框图</button>
+        <button onclick="parseVideo('${video.id}', 'markdown')">生成最终 Markdown</button>
       </div>
     </div>
     <div class="analysis-progress">
@@ -384,45 +392,31 @@ function renderVideoShell(video) {
     </div>
     <div class="analysis-section-label">解析结果</div>
     <div class="result-tabs">
-      <button class="result-tab active" data-video-tab="frames" onclick="switchVideoTab('frames')">关键帧</button>
-      <button class="result-tab" data-video-tab="transcript" onclick="switchVideoTab('transcript')">转写文本</button>
+      <button class="result-tab active" data-video-tab="transcript" onclick="switchVideoTab('transcript')">转写文本</button>
+      <button class="result-tab" data-video-tab="frames" onclick="switchVideoTab('frames')">语义帧</button>
       <button class="result-tab" data-video-tab="wireframes" onclick="switchVideoTab('wireframes')">线框图</button>
       <button class="result-tab" data-video-tab="markdown" onclick="switchVideoTab('markdown')">Markdown</button>
     </div>
-    <div id="framesTab" class="video-tab artifact-panel"></div>
     <div id="transcriptTab" class="video-tab hidden">
-      <div class="transcript-dual-grid">
-        <section class="text-result transcript-pane">
-          <div class="transcript-pane-head">
-            <strong>新版结构化转写</strong>
-          </div>
-          <div class="transcript-text-box">
-            <button class="transcript-copy-button" onclick="copyActiveTranscript()" aria-label="复制新版结构化转写">
-              <svg viewBox="0 0 24 24" aria-hidden="true">
-                <rect x="9" y="9" width="10" height="10" rx="2" />
-                <rect x="5" y="5" width="10" height="10" rx="2" />
-              </svg>
-              <span>复制</span>
-            </button>
-            <pre id="transcriptText">暂无新版结构化转写。</pre>
-          </div>
-        </section>
-        <section class="text-result transcript-pane">
-          <div class="transcript-pane-head">
-            <strong>原始 ASR 转写</strong>
-          </div>
-          <div class="transcript-text-box">
-            <button class="transcript-copy-button raw-asr-copy-button" onclick="copyRawAsrTranscript()" aria-label="复制原始 ASR 转写">
-              <svg viewBox="0 0 24 24" aria-hidden="true">
-                <rect x="9" y="9" width="10" height="10" rx="2" />
-                <rect x="5" y="5" width="10" height="10" rx="2" />
-              </svg>
-              <span>复制</span>
-            </button>
-            <pre id="rawAsrText">暂无原始 ASR 转写。</pre>
-          </div>
-        </section>
-      </div>
+      <section class="text-result transcript-pane">
+        <div class="transcript-pane-head">
+          <strong>最新结构化转写</strong>
+        </div>
+        <div class="transcript-text-box">
+          <button class="transcript-copy-button" onclick="copyActiveTranscript()" aria-label="复制最新结构化转写">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <rect x="9" y="9" width="10" height="10" rx="2" />
+              <rect x="5" y="5" width="10" height="10" rx="2" />
+            </svg>
+            <span>复制</span>
+          </button>
+          <pre id="transcriptText">暂无最新结构化转写。</pre>
+        </div>
+      </section>
+    </div>
+    <div id="framesTab" class="video-tab artifact-panel hidden"></div>
+    <div id="wireframesTab" class="video-tab hidden">
+      <div id="wireframesGrid" class="frames-grid"></div>
     </div>
     <div id="markdownTab" class="video-tab hidden">
       <div class="markdown-result">
@@ -445,9 +439,6 @@ function renderVideoShell(video) {
         <pre id="markdownText" class="hidden">暂无 Markdown。</pre>
       </div>
     </div>
-    <div id="wireframesTab" class="video-tab hidden">
-      <div id="wireframesGrid" class="frames-grid"></div>
-    </div>
   `;
   switchVideoTab(state.activeVideoTab);
 }
@@ -456,7 +447,7 @@ window.parseVideo = async (id, mode) => {
   state.activeParseMode = mode;
   const labels = {
     full: "完整解析",
-    keyframes: "关键帧",
+    keyframes: "抽取候选业务帧/语义帧",
     wireframes: "线框图",
     transcript: "转写文本",
     markdown: "Markdown 报告",
@@ -468,9 +459,9 @@ window.parseVideo = async (id, mode) => {
     markdown: "markdown",
   };
   const startingText = {
-    full: "正在启动完整解析流程",
-    keyframes: "正在使用本地 FFmpeg 抽取关键帧",
-    wireframes: "正在筛选关键帧并生成线框图",
+    full: "正在启动完整解析流程，将先生成结构化转写文本",
+    keyframes: "正在抽取候选业务帧并生成语义帧",
+    wireframes: "正在筛选业务帧并生成线框图",
     transcript: "正在调用本地 ASR 模型进行原始转写",
     markdown: "正在根据结构化转写生成 Markdown 报告",
   };
@@ -522,18 +513,20 @@ async function loadActiveVideoTab(id) {
 }
 
 async function loadVideoFrames(id) {
+  const report = await fetchJson(`/api/videos/${id}/semantic-frames`).catch(() => null);
+  if (report?.sections) {
+    renderSemanticFrameReport(report);
+    return;
+  }
   const frames = await fetchJson(`/api/videos/${id}/frames`).catch(() => []);
   renderFrames(frames);
 }
 
 async function loadVideoTranscript(id) {
   const transcriptEl = document.getElementById("transcriptText");
-  const rawEl = document.getElementById("rawAsrText");
-  if (transcriptEl) transcriptEl.textContent = "正在加载新版结构化转写...";
-  if (rawEl) rawEl.textContent = "正在加载原始 ASR 转写...";
-  const transcript = await fetchJson(`/api/videos/${id}/transcript`).catch(() => ({ text: "", raw_text: "", rendered_text: "" }));
-  if (transcriptEl) transcriptEl.textContent = transcript.rendered_text || "暂无新版结构化转写，请点击“转写文本”重新生成。";
-  if (rawEl) rawEl.textContent = transcript.raw_text || "暂无原始 ASR 转写。";
+  if (transcriptEl) transcriptEl.textContent = "正在加载最新结构化转写...";
+  const transcript = await fetchJson(`/api/videos/${id}/transcript`).catch(() => ({ text: "", rendered_text: "" }));
+  if (transcriptEl) transcriptEl.textContent = transcript.rendered_text || transcript.text || "暂无最新结构化转写，请点击“转写文本”重新生成。";
 }
 
 async function loadVideoMarkdown(id) {
@@ -606,15 +599,7 @@ window.copyActiveTranscript = async () => {
   await copyTextResult({
     textId: "transcriptText",
     buttonSelector: ".transcript-copy-button",
-    emptyTexts: ["暂无新版结构化转写。", "暂无新版结构化转写，请点击“转写文本”重新生成。", "正在加载新版结构化转写..."],
-  });
-};
-
-window.copyRawAsrTranscript = async () => {
-  await copyTextResult({
-    textId: "rawAsrText",
-    buttonSelector: ".raw-asr-copy-button",
-    emptyTexts: ["暂无原始 ASR 转写。", "正在加载原始 ASR 转写..."],
+    emptyTexts: ["暂无最新结构化转写。", "暂无最新结构化转写，请点击“转写文本”重新生成。", "正在加载最新结构化转写..."],
   });
 };
 
@@ -627,12 +612,12 @@ function renderFrames(frames) {
   const target = document.getElementById("framesTab");
   if (!target) return;
   if (!frames.length) {
-    target.innerHTML = '<div class="empty">暂无关键帧。</div>';
+    target.innerHTML = '<div class="empty">暂无候选业务帧。</div>';
     return;
   }
   target.innerHTML = `<div class="frames-grid">${frames.map((f) => `
     <figure class="frame-card">
-      <img src="${f.url}" alt="${escapeHtml(f.caption || "关键帧")}" loading="lazy" onclick="openImagePreview('${f.url}')" />
+      <img src="${f.url}" alt="${escapeHtml(f.caption || "候选业务帧")}" loading="lazy" onclick="openImagePreview('${f.url}')" />
       <figcaption>
         <strong>${formatTimestamp(f.timestamp_seconds || 0)}</strong>
         <span>${escapeHtml(f.caption || "")}</span>
@@ -641,12 +626,116 @@ function renderFrames(frames) {
   `).join("")}</div>`;
 }
 
+function renderSemanticFrameReport(report) {
+  const target = document.getElementById("framesTab");
+  if (!target) return;
+  const sections = Array.isArray(report.sections) ? report.sections : [];
+  if (!sections.length) {
+    target.innerHTML = '<div class="empty">暂无语义帧结果。请先点击“转写文本（包括结构化文本）”，再点击“抽取候选业务帧/语义帧”。</div>';
+    return;
+  }
+  const summary = report.summary || {};
+  target.innerHTML = `
+    <div class="semantic-frame-summary">
+      <span>候选业务帧：${Number(summary.raw_frame_count || 0)}</span>
+      <span>候选语义帧：${Number(summary.candidate_frame_count || 0)}</span>
+      <span>文本段落：${Number(summary.section_count || sections.length)}</span>
+      <span>关键操作：${Number(summary.visual_operation_count || summary.frame_query_count || 0)}</span>
+      <span>模型：${escapeHtml(report.embedding_model || "qwen3-vl-embedding")}</span>
+    </div>
+    <div class="semantic-section-list">
+      ${sections.map(renderSemanticSection).join("")}
+    </div>
+  `;
+}
+
+function renderSemanticSection(section) {
+  const rawFrames = Array.isArray(section.raw_frames) ? section.raw_frames : [];
+  const semanticFrames = Array.isArray(section.semantic_frames) ? section.semantic_frames : [];
+  const frameQueryMatches = Array.isArray(section.frame_query_matches) ? section.frame_query_matches : [];
+  const timeRange = `${section.start_time || formatTimestamp(section.start_seconds || 0)} - ${section.end_time || formatTimestamp(section.end_seconds || 0)}`;
+  return `
+    <section class="semantic-section">
+      <div class="semantic-section-head">
+        <div>
+          <h3>${escapeHtml(section.index || "")}. ${escapeHtml(section.title || "文本段落")}</h3>
+          <div class="muted">${escapeHtml(timeRange)}</div>
+        </div>
+      </div>
+      <p class="semantic-section-text">${escapeHtml(section.text || "")}</p>
+      <div class="semantic-frame-block">
+        <h4>候选业务帧</h4>
+        ${rawFrames.length ? `<div class="frames-grid compact-frames-grid">${rawFrames.map((frame) => renderFrameCard(frame, { score: false })).join("")}</div>` : '<div class="empty">该段落时间范围内暂无候选业务帧。</div>'}
+      </div>
+      <div class="semantic-frame-block">
+        <h4>关键操作相似度复核</h4>
+        ${frameQueryMatches.length ? renderFrameQueryMatches(frameQueryMatches) : (semanticFrames.length ? `<div class="frames-grid semantic-frames-grid">${semanticFrames.map((frame) => renderFrameCard(frame, { score: true })).join("")}</div>` : '<div class="empty">暂无语义帧匹配结果。</div>')}
+      </div>
+    </section>
+  `;
+}
+
+function renderFrameQueryMatches(matches) {
+  return `
+    <div class="frame-query-match-list">
+      ${matches.map((match) => {
+        const frames = Array.isArray(match.frames) ? match.frames : [];
+        const source = match.frame_queries_source || match.source || "";
+        const sourceLabel = frameQuerySourceLabel(source);
+        const operationTime = match.operation_start_time && match.operation_end_time ? `${match.operation_start_time} - ${match.operation_end_time}` : "";
+        const operationText = match.operation_text || `关键操作 ${Number(match.operation_index || match.query_index || 0)}`;
+        return `
+          <section class="frame-query-match">
+            <div class="frame-query-text">
+              <strong>${Number(match.operation_index || match.query_index || 0)}. ${escapeHtml(operationText)}</strong>
+              ${sourceLabel ? `<em class="frame-query-source ${source === "fallback_title_text" ? "fallback" : ""}">${escapeHtml(sourceLabel)}</em>` : ""}
+              ${operationTime ? `<small>${escapeHtml(operationTime)}</small>` : ""}
+              <span>${escapeHtml(match.query_text || match.embedding_text || "")}</span>
+            </div>
+            ${frames.length ? `<div class="frames-grid semantic-frames-grid">${frames.map((frame) => renderFrameCard(frame, { score: true })).join("")}</div>` : '<div class="empty">该关键操作暂无候选帧相似度。</div>'}
+          </section>
+        `;
+      }).join("")}
+    </div>
+  `;
+}
+
+function frameQuerySourceLabel(source) {
+  if (source === "fallback_title_text") return "fallback";
+  if (source === "model") return "model";
+  if (source === "visual_operations") return "关键操作";
+  return "";
+}
+
+function renderFrameCard(frame, options = {}) {
+  const url = frame.url || "";
+  const timestamp = frame.timestamp_time || formatTimestamp(frame.timestamp_seconds || 0);
+  const similarity = Number(frame.similarity);
+  const scoreText = Number.isFinite(similarity) ? similarity.toFixed(4) : "";
+  const filterLabel = frame.filter_label || rawFrameFilterLabel(frame.filter_status);
+  return `
+    <figure class="frame-card">
+      <img src="${escapeHtml(url)}" alt="候选业务帧 ${escapeHtml(timestamp)}" loading="lazy" onclick="openImagePreview('${escapeJsString(url)}')" />
+      <figcaption>
+        <strong>${escapeHtml(timestamp)}</strong>
+        ${options.score ? `<span>相似度：${escapeHtml(scoreText)}</span>` : (filterLabel ? `<span class="frame-filter-label">${escapeHtml(filterLabel)}</span>` : "")}
+      </figcaption>
+    </figure>
+  `;
+}
+
+function rawFrameFilterLabel(status) {
+  if (status === "quality_rejected") return "质量不通过";
+  if (status === "duplicate_rejected") return "重复";
+  return "";
+}
+
 function renderWireframes(wireframes) {
   const target = document.getElementById("wireframesGrid");
   if (!target) return;
   if (wireframes.some((item) => item.kind === "selection_preview")) {
     if (!wireframes.length) {
-      target.innerHTML = '<div class="empty">暂无入选帧。点击生成线框图后会先完成关键帧筛选。</div>';
+      target.innerHTML = '<div class="empty">暂无入选业务帧。点击生成线框图后会先完成业务帧筛选。</div>';
       return;
     }
     target.innerHTML = wireframes.map(renderFrameSelectionPreview).join("");
@@ -734,10 +823,10 @@ function updateVideoProgress(video) {
 
 function applyParseCompletionMessage(mode, video) {
   const messages = {
-    full: ["全部工作已完成", "关键帧、转写文本、关键帧筛选/线框图和 Markdown 都已完成。"],
-    keyframes: ["关键帧解析已完成", "接下来可以生成转写文本，再筛选关键帧生成线框图。"],
-    wireframes: ["关键帧筛选/线框图已完成", "接下来可以生成 Markdown。"],
-    transcript: ["转写文本已完成", "已生成原始 ASR 转写和新版语义结构化转写。"],
+    full: ["全部工作已完成", "候选业务帧、转写文本、业务帧筛选/线框图和 Markdown 都已完成。"],
+    keyframes: ["语义帧抽取已完成", "已按文本段落输出候选业务帧、语义帧和相似度分数。"],
+    wireframes: ["业务帧筛选/线框图已完成", "接下来可以生成 Markdown。"],
+    transcript: ["转写文本已完成", "已生成最新结构化转写。"],
     markdown: ["Markdown 报告已完成", "可以在 Markdown 标签中查看并复制。"],
   };
   const [stageMessage, hintMessage] = messages[mode] || [statusLabel(video), ""];
@@ -857,7 +946,7 @@ function updateWireframeJobUI(job) {
       error.classList.add("error-text");
     }
   } else {
-    if (stage) stage.textContent = "正在筛选关键帧并准备展示筛选结果";
+    if (stage) stage.textContent = "正在筛选业务帧并准备展示筛选结果";
     if (error) {
       error.textContent = "";
       error.classList.remove("error-text");
@@ -937,6 +1026,112 @@ function uploadSelectedStandards() {
   };
   xhr.open("POST", "/api/standards/upload");
   xhr.send(form);
+}
+
+async function startOpenstdCrawl() {
+  const button = document.getElementById("startOpenstdCrawl");
+  const status = document.getElementById("openstdCrawlStatus");
+  if (button) button.disabled = true;
+  if (status) status.textContent = "正在创建采集任务...";
+  try {
+    const job = await fetchJson("/api/standards/openstd/crawl", { method: "POST" });
+    state.openstdCrawlJob = job;
+    renderOpenstdCrawlStatus(job);
+    startOpenstdCrawlPolling(job.id);
+  } catch (error) {
+    if (status) status.textContent = `创建采集任务失败：${error.message}`;
+    if (button) button.disabled = false;
+  }
+}
+
+async function loadLatestOpenstdCrawl() {
+  try {
+    const job = await fetchJson("/api/standards/openstd/crawl/latest");
+    if (!job || job.status === "none") {
+      renderOpenstdCrawlStatus(null);
+      return;
+    }
+    state.openstdCrawlJob = job;
+    renderOpenstdCrawlStatus(job);
+    if (isOpenstdCrawlRunning(job)) startOpenstdCrawlPolling(job.id);
+  } catch {
+    renderOpenstdCrawlStatus(null);
+  }
+}
+
+function startOpenstdCrawlPolling(jobId) {
+  if (state.openstdCrawlPoll) {
+    clearInterval(state.openstdCrawlPoll);
+    state.openstdCrawlPoll = null;
+  }
+  state.openstdCrawlPoll = setInterval(async () => {
+    try {
+      const job = await fetchJson(`/api/standards/openstd/crawl/${jobId}`);
+      state.openstdCrawlJob = job;
+      renderOpenstdCrawlStatus(job);
+      if (!isOpenstdCrawlRunning(job)) {
+        clearInterval(state.openstdCrawlPoll);
+        state.openstdCrawlPoll = null;
+        document.getElementById("startOpenstdCrawl").disabled = false;
+        await loadStandards();
+      }
+    } catch (error) {
+      const status = document.getElementById("openstdCrawlStatus");
+      if (status) status.textContent = `读取采集进度失败：${error.message}`;
+    }
+  }, 3000);
+}
+
+function isOpenstdCrawlRunning(job) {
+  return ["queued", "running"].includes(job?.status);
+}
+
+function renderOpenstdCrawlStatus(job) {
+  const status = document.getElementById("openstdCrawlStatus");
+  const bar = document.getElementById("openstdCrawlProgressBar");
+  const button = document.getElementById("startOpenstdCrawl");
+  if (!status || !bar) return;
+  if (!job) {
+    status.textContent = "暂无采集任务。";
+    bar.style.width = "0%";
+    bar.classList.remove("indeterminate");
+    if (button) button.disabled = false;
+    return;
+  }
+  const discovered = Number(job.total_discovered || 0);
+  const done = Number(job.uploaded_count || 0)
+    + Number(job.skipped_duplicate_count || 0)
+    + Number(job.skipped_unavailable_count || 0)
+    + Number(job.failed_count || 0);
+  const percent = discovered > 0 ? Math.min(100, Math.round((done / discovered) * 100)) : 2;
+  bar.style.width = `${percent}%`;
+  bar.classList.toggle("indeterminate", isOpenstdCrawlRunning(job) && discovered === 0);
+  const pageText = job.total_pages ? `页数 ${job.current_page || 0}/${job.total_pages}` : `页数 ${job.current_page || 0}`;
+  const statusCounts = job.standard_status_counts || {};
+  const currentStatus = Number(statusCounts.current || 0);
+  const upcomingStatus = Number(statusCounts.upcoming || 0);
+  const scrappedStatus = Number(statusCounts.scrapped || 0);
+  const otherStatus = Number(statusCounts.other || 0);
+  const otherStatusText = otherStatus ? ` · 其他 ${otherStatus}` : "";
+  const current = job.current_item ? `当前：${job.current_item}` : "当前：暂无";
+  const error = job.error_message ? `<div class="openstd-crawl-line openstd-crawl-error">错误：${escapeHtml(job.error_message)}</div>` : "";
+  status.innerHTML = `
+    <div class="openstd-crawl-line">${escapeHtml(openstdStatusLabel(job.status))} · ${escapeHtml(pageText)} · 发现 ${discovered} · 现行 ${currentStatus} · 即将实施 ${upcomingStatus} · 废止 ${scrappedStatus}${otherStatusText}</div>
+    <div class="openstd-crawl-line">已上传 ${Number(job.uploaded_count || 0)} · 重复 ${Number(job.skipped_duplicate_count || 0)} · 不可下载 ${Number(job.skipped_unavailable_count || 0)} · 失败 ${Number(job.failed_count || 0)}</div>
+    <div class="openstd-crawl-line">${escapeHtml(current)}</div>
+    ${error}
+  `;
+  if (button) button.disabled = job.status === "running";
+}
+
+function openstdStatusLabel(status) {
+  return {
+    queued: "等待采集任务启动",
+    running: "正在采集",
+    completed: "采集完成",
+    completed_with_errors: "采集完成，有失败项",
+    failed: "采集失败",
+  }[status] || "未知状态";
 }
 
 async function loadStandards() {
@@ -1936,6 +2131,9 @@ function formatLogAction(row) {
     if (target === "POST /api/standards/upload") {
       return renderLogAction("标准库 · 上传 PDF", "POST /api/standards/upload");
     }
+    if (target === "POST /api/standards/openstd/crawl") {
+      return renderLogAction("标准库 · 一键爬取国家标准 PDF", "POST /api/standards/openstd/crawl");
+    }
     if (target === "POST /api/standards/{standard_id}/materialize") {
       return renderLogAction("标准库 · 提交解析任务", formatStandardEndpoint(target, standardId));
     }
@@ -1969,6 +2167,12 @@ function formatLogAction(row) {
         compactDetails(["standard_materialize_job", standardId ? `standard_id=${standardId}` : ""]),
       );
     }
+    if (target === "openstd_crawl_job") {
+      return renderLogAction(
+        "标准库 · 后台采集国家标准 PDF",
+        compactDetails(["openstd_crawl_job", request.job_id ? `job_id=${request.job_id}` : ""]),
+      );
+    }
   }
 
   if (row.interface_type === "model") {
@@ -1979,7 +2183,7 @@ function formatLogAction(row) {
       return renderLogAction("模型调用 · 结构化转写", target);
     }
     if (target === "qwen.chat.completions.frame_selection") {
-      return renderLogAction("模型调用 · 关键帧筛选", target);
+      return renderLogAction("模型调用 · 业务帧筛选", target);
     }
     if (target === "qwen.chat.completions.standard_markdown") {
       return renderLogAction("模型调用 · 生成标准 Markdown", target);
@@ -2037,7 +2241,7 @@ function videoParseSubmissionLabel(mode) {
 function videoParseStepLabel(mode) {
   return {
     full: "一键解析",
-    keyframes: "关键帧",
+    keyframes: "业务帧",
     wireframes: "线框图",
     transcript: "转写文本",
     markdown: "Markdown",
@@ -2139,20 +2343,31 @@ function videoProgressLabel(task) {
   if (!task) return "等待中";
   if (task.status === "failed") return "失败";
   if (["completed", "completed_with_warnings"].includes(task.status)) return "完成";
+  const stepProgress = videoStageCountLabel(task);
+  if (stepProgress) return stepProgress;
   const stage = task.current_stage || task.status;
   if (stage === "transcribing_asr" || stage === "transcribing") return "步骤 1/2";
   if (stage === "structuring_transcript") return "步骤 2/2";
   if (stage === "generating_markdown") return "生成中";
   if (stage === "generating_wireframes") return "生成中";
-  if (stage === "extracting_keyframes") return "解析中";
+  if (stage === "extracting_keyframes") return "密集抽帧中";
+  if (stage === "semantic_matching") return "语义匹配中";
   if (stage === "uploaded") return "等待中";
   return isVideoTaskIndeterminate(task) ? "处理中" : "等待中";
+}
+
+function videoStageCountLabel(task) {
+  const total = Number(task.stage_total || 0);
+  if (!Number.isFinite(total) || total <= 0) return "";
+  const processed = Math.max(0, Math.min(total, Number(task.stage_processed || 0)));
+  const message = String(task.stage_message || "").trim();
+  return `${message ? `${message} ` : ""}${processed}/${total}`;
 }
 
 function startingVideoProgressLabel(mode) {
   if (mode === "transcript") return "步骤 1/2";
   if (mode === "markdown") return "生成中";
-  if (mode === "keyframes") return "解析中";
+  if (mode === "keyframes") return "抽取中";
   if (mode === "wireframes") return "生成中";
   if (mode === "full") return "处理中";
   return "处理中";
@@ -2261,4 +2476,5 @@ function escapeJsString(value) {
 
 loadVideos();
 loadStandards();
+loadLatestOpenstdCrawl();
 

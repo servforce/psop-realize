@@ -89,6 +89,17 @@
               </div>
               <div id="standardUploadInfo" class="muted">等待上传 PDF。</div>
               <div class="progress"><div id="standardUploadProgressBar"></div></div>
+              <section class="openstd-crawl-panel">
+                <div class="openstd-crawl-head">
+                  <div>
+                    <h2 class="video-panel-title">国家标准公开系统</h2>
+                    <div class="muted">指导性技术文件 GB/Z · 可下载 PDF 导入 MinIO</div>
+                  </div>
+                  <button id="startOpenstdCrawl" class="secondary" type="button">一键爬取国家标准 PDF</button>
+                </div>
+                <div id="openstdCrawlStatus" class="openstd-crawl-status">暂无采集任务。</div>
+                <div class="progress"><div id="openstdCrawlProgressBar"></div></div>
+              </section>
               <h2 class="video-panel-title standard-directory-title">标准目录</h2>
               <div class="video-directory-tools">
                 <div class="video-search-box standard-search-box">
@@ -178,6 +189,6 @@
       </section>
 
     </main>
-    <script src="/static/assets/app.js?v=20260720-model-detail-links"></script>
+    <script src="/static/assets/app.js?v=20260728-openstd-status-lines"></script>
   </body>
 </html>

@@ -172,15 +172,15 @@ def validate_paths(*, input_path: Path, output_path: Path, prompt_path: Path, ov
 
 
 def resolve_provider_config(args: argparse.Namespace) -> ProviderConfig:
-    api_key = resolve_env_value("DASHSCOPE_API_KEY")
+    api_key = resolve_env_value("MODEL_API_KEY") or resolve_env_value("DASHSCOPE_API_KEY")
     if not api_key:
         raise WireframeError(
-            "DASHSCOPE_API_KEY is not set",
-            hint="Set DASHSCOPE_API_KEY in the shell environment or in the project .env file.",
+            "MODEL_API_KEY or DASHSCOPE_API_KEY is not set",
+            hint="Set MODEL_API_KEY in the shell environment or in the project .env file.",
         )
 
-    workspace_id = args.workspace_id or resolve_env_value("BAILIAN_WORKSPACE_ID") or resolve_env_value("DASHSCOPE_WORKSPACE_ID")
-    base_url = args.base_url or base_url_from_workspace(workspace_id=workspace_id, region=args.region)
+    workspace_id = resolve_workspace_id(args)
+    base_url = resolve_dashscope_base_url(args=args, workspace_id=workspace_id)
     return ProviderConfig(
         api_key=api_key,
         base_url=base_url.rstrip("/"),
@@ -196,6 +196,23 @@ def base_url_from_workspace(*, workspace_id: str | None, region: str) -> str:
     if region == "ap-southeast-1":
         return f"https://{workspace_id}.ap-southeast-1.maas.aliyuncs.com"
     return f"https://{workspace_id}.cn-beijing.maas.aliyuncs.com"
+
+
+def resolve_workspace_id(args: argparse.Namespace) -> str | None:
+    return (
+        args.workspace_id
+        or resolve_env_value("BAILIAN_WORKSPACE_ID")
+        or resolve_env_value("DASHSCOPE_WORKSPACE_ID")
+    )
+
+
+def resolve_dashscope_base_url(*, args: argparse.Namespace, workspace_id: str | None) -> str:
+    return (
+        args.base_url
+        or resolve_env_value("MODEL_DASHSCOPE_BASE_URL")
+        or resolve_env_value("DASHSCOPE_BASE_URL")
+        or base_url_from_workspace(workspace_id=workspace_id, region=args.region)
+    )
 
 
 def resolve_env_value(key: str) -> str | None:
@@ -425,7 +442,11 @@ def guess_image_media_type(path: Path) -> str:
 
 
 def make_url(base_url: str, path: str) -> str:
-    return urljoin(f"{base_url.rstrip('/')}/", path.lstrip("/"))
+    normalized_base_url = base_url.rstrip("/")
+    normalized_path = path.lstrip("/")
+    if normalized_base_url.endswith("/api/v1") and normalized_path.startswith("api/v1/"):
+        normalized_path = normalized_path[len("api/v1/") :]
+    return urljoin(f"{normalized_base_url}/", normalized_path)
 
 
 def download_image_bytes(url: str, *, timeout: float) -> bytes:
@@ -437,10 +458,8 @@ def download_image_bytes(url: str, *, timeout: float) -> bytes:
 
 
 def failure_payload(exc: Exception, *, args: argparse.Namespace) -> dict[str, Any]:
-    base_url = args.base_url or base_url_from_workspace(
-        workspace_id=args.workspace_id or resolve_env_value("BAILIAN_WORKSPACE_ID") or resolve_env_value("DASHSCOPE_WORKSPACE_ID"),
-        region=args.region,
-    )
+    workspace_id = resolve_workspace_id(args)
+    base_url = resolve_dashscope_base_url(args=args, workspace_id=workspace_id)
     payload: dict[str, Any] = {
         "ok": False,
         "input": args.input,

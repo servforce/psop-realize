@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from pathlib import Path
 
@@ -24,23 +24,17 @@ def media_type_for_suffix(suffix: str) -> str:
 
 
 def transcribe_or_fallback(source_path: Path, filename: str, object_key: str, frames: list[VideoFrame]) -> dict:
-    if local_asr_client.enabled():
-        result = local_asr_client.transcribe_video_file(
-            path=source_path,
-            media_type=media_type_for_suffix(source_path.suffix),
-            language=settings.local_asr_language,
-        )
-        return {
-            "text": result.text,
-            "language": result.language,
-            "provider": "local_video",
-            "raw_response": result.raw_response,
-        }
+    if not local_asr_client.enabled():
+        raise RuntimeError("LOCAL_ASR_API_BASE_URL is not configured")
+    result = local_asr_client.transcribe_video_file(
+        path=source_path,
+        media_type=media_type_for_suffix(source_path.suffix),
+        language=settings.local_asr_language,
+    )
     return {
-        "text": build_placeholder_transcript(filename, frames),
-        "language": settings.local_asr_language,
-        "provider": "placeholder",
-        "raw_response": {"source_object_key": object_key},
+        "language": result.language,
+        "provider": "local_video",
+        "raw_response": result.raw_response,
     }
 
 
@@ -61,6 +55,121 @@ def extract_keyframes_like_vidnote(video_path: Path, frame_dir: Path, max_keyfra
         return [output]
     write_placeholder_jpeg(output)
     return [output]
+
+
+def extract_dense_frames(video_path: Path, frame_dir: Path, *, interval_seconds: float) -> list[Path]:
+    frame_dir.mkdir(parents=True, exist_ok=True)
+    duration_ms = probe_video_duration_ms(video_path)
+    timestamps = dense_sample_timestamps_ms(duration_ms=duration_ms, interval_seconds=interval_seconds)
+    return extract_frames_at_timestamps(video_path=video_path, frame_dir=frame_dir, timestamps_ms=timestamps)
+
+
+def extract_candidate_frames(video_path: Path, frame_dir: Path, *, interval_seconds: float) -> list[Path]:
+    frame_dir.mkdir(parents=True, exist_ok=True)
+    duration_ms = probe_video_duration_ms(video_path)
+    scene_timestamps: list[int] = []
+    if settings.video_scene_change_frame_enabled:
+        scene_timestamps = detect_scene_change_timestamps_ms(video_path)
+    timestamps = build_candidate_frame_timestamps_ms(
+        duration_ms=duration_ms,
+        interval_seconds=interval_seconds,
+        scene_timestamps_ms=scene_timestamps,
+        min_spacing_ms=settings.video_candidate_frame_min_spacing_ms,
+    )
+    return extract_frames_at_timestamps(video_path=video_path, frame_dir=frame_dir, timestamps_ms=timestamps)
+
+
+def extract_frames_at_timestamps(*, video_path: Path, frame_dir: Path, timestamps_ms: list[int]) -> list[Path]:
+    outputs = []
+    for timestamp_ms in timestamps_ms:
+        output = frame_dir / f"{timestamp_ms:09d}.jpg"
+        if extract_frame_at_timestamp(video_path=video_path, output_path=output, timestamp_ms=timestamp_ms):
+            outputs.append(output)
+    if outputs:
+        return outputs
+    output = frame_dir / "000000000.jpg"
+    if extract_first_frame(video_path=video_path, output_path=output):
+        return [output]
+    write_placeholder_jpeg(output)
+    return [output]
+
+
+def build_candidate_frame_timestamps_ms(
+    *,
+    duration_ms: int,
+    interval_seconds: float,
+    scene_timestamps_ms: list[int],
+    min_spacing_ms: int,
+) -> list[int]:
+    dense = dense_sample_timestamps_ms(duration_ms=duration_ms, interval_seconds=interval_seconds)
+    valid_scene = [
+        int(timestamp)
+        for timestamp in scene_timestamps_ms
+        if timestamp >= 0 and (duration_ms <= 0 or timestamp < duration_ms)
+    ]
+    return merge_close_timestamps_ms([*dense, *valid_scene], min_spacing_ms=min_spacing_ms)
+
+
+def dense_sample_timestamps_ms(*, duration_ms: int, interval_seconds: float) -> list[int]:
+    interval_ms = max(500, int(round(max(0.1, interval_seconds) * 1000)))
+    if duration_ms <= 0:
+        return [0]
+    values = list(range(0, max(1, duration_ms), interval_ms))
+    final_timestamp = max(0, duration_ms - 1000)
+    if final_timestamp and (not values or final_timestamp - values[-1] > interval_ms // 2):
+        values.append(final_timestamp)
+    return sorted(set(values)) or [0]
+
+
+def merge_close_timestamps_ms(timestamps_ms: list[int], *, min_spacing_ms: int) -> list[int]:
+    spacing = max(0, int(min_spacing_ms))
+    merged: list[int] = []
+    for timestamp_ms in sorted(set(max(0, int(value)) for value in timestamps_ms)):
+        if merged and timestamp_ms - merged[-1] < spacing:
+            continue
+        merged.append(timestamp_ms)
+    return merged or [0]
+
+
+def generate_analysis_proxy_video(source_path: Path, output_path: Path) -> None:
+    import subprocess
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    height = max(144, int(settings.video_analysis_proxy_height or 720))
+    crf = max(0, min(51, int(settings.video_analysis_proxy_crf or 28)))
+    preset = settings.video_analysis_proxy_preset or "medium"
+    audio_bitrate = settings.video_analysis_proxy_audio_bitrate or "128k"
+    command = [
+        ffmpeg_exe(),
+        "-y",
+        "-i",
+        str(source_path),
+        "-map",
+        "0:v:0",
+        "-map",
+        "0:a:0?",
+        "-vf",
+        f"scale=-2:{height}",
+        "-c:v",
+        "libx265",
+        "-tag:v",
+        "hvc1",
+        "-crf",
+        str(crf),
+        "-preset",
+        preset,
+        "-c:a",
+        "aac",
+        "-b:a",
+        audio_bitrate,
+        "-movflags",
+        "+faststart",
+        str(output_path),
+    ]
+    result = subprocess.run(command, check=False, capture_output=True, timeout=3600)
+    if result.returncode != 0 or not output_path.exists() or output_path.stat().st_size <= 0:
+        stderr = result.stderr.decode("utf-8", errors="replace")[-4000:]
+        raise RuntimeError(f"Failed to generate 720P H.265 analysis proxy video: {stderr}")
 
 
 def ffmpeg_exe() -> str:
@@ -106,6 +215,7 @@ def detect_scene_change_timestamps_ms(video_path: Path) -> list[int]:
     import re
     import subprocess
 
+    threshold = max(0.0, min(1.0, float(settings.video_scene_change_threshold or 0.25)))
     command = [
         ffmpeg_exe(),
         "-hide_banner",
@@ -113,7 +223,7 @@ def detect_scene_change_timestamps_ms(video_path: Path) -> list[int]:
         str(video_path),
         "-an",
         "-vf",
-        "scale=320:-2,select='gt(scene,0.25)',showinfo",
+        f"scale=320:-2,select='gt(scene,{threshold})',showinfo",
         "-f",
         "null",
         "-",
@@ -226,9 +336,3 @@ def format_timestamp(seconds: float) -> str:
     return f"{minutes:02d}:{secs:02d}"
 
 
-def build_placeholder_transcript(filename: str, frames: list[VideoFrame]) -> str:
-    return (
-        f"视频文件 {filename} 已完成第一版分析。"
-        f"系统已提取 {len(frames)} 张关键帧。"
-        "当前版本按需求先使用 ASR + 关键帧路线；未配置 ASR 服务时生成此占位转写。"
-    )

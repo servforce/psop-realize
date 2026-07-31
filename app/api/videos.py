@@ -28,7 +28,7 @@ from app.services.video_parsing import (
 )
 from app.services.video_outputs import (
     markdown_object_key,
-    raw_asr_object_key,
+    semantic_frame_matches_object_key,
     transcript_rendered_object_key,
     transcript_tree_object_key,
 )
@@ -49,7 +49,7 @@ async def upload_video(file: UploadFile = File(...), title: str = Form("")):
     filename = safe_filename(file.filename or "video.mp4")
     suffix = Path(filename).suffix.lower()
     if suffix not in SUPPORTED_SUFFIXES:
-        raise HTTPException(status_code=400, detail=f"不支持的视频格式: {suffix or 'unknown'}")
+        raise HTTPException(status_code=400, detail=f"涓嶆敮鎸佺殑瑙嗛鏍煎紡: {suffix or 'unknown'}")
 
     video_id = uuid.uuid4().hex
     media_type = file.content_type or media_type_for_suffix(suffix)
@@ -68,10 +68,10 @@ async def upload_video(file: UploadFile = File(...), title: str = Form("")):
                     break
                 size += len(chunk)
                 if size > settings.video_max_upload_bytes:
-                    raise HTTPException(status_code=413, detail="视频文件超过上传大小限制")
+                    raise HTTPException(status_code=413, detail="瑙嗛鏂囦欢瓒呰繃涓婁紶澶у皬闄愬埗")
                 output.write(chunk)
         if size <= 0:
-            raise HTTPException(status_code=400, detail="上传文件为空")
+            raise HTTPException(status_code=400, detail="涓婁紶鏂囦欢涓虹┖")
 
         stored = storage_service.upload_file(object_key=object_key, path=temp_path, media_type=media_type)
         with SessionLocal() as session:
@@ -133,7 +133,7 @@ def parse_video(video_id: str, background_tasks: BackgroundTasks, mode: str = Qu
                 raise HTTPException(status_code=404, detail="视频任务不存在")
             if mode == "wireframes":
                 if job.frame_count <= 0:
-                    raise HTTPException(status_code=400, detail="视频还没有关键帧，请先解析关键帧")
+                    raise HTTPException(status_code=400, detail="瑙嗛杩樻病鏈夊叧閿抚锛岃鍏堣В鏋愬叧閿抚")
                 wireframe_job = create_wireframe_job(video_id)
                 refreshed_wireframe_job = get_wireframe_job(wireframe_job.id) or wireframe_job
                 background_tasks.add_task(run_video_parse_job, video_id, mode, wireframe_job.id)
@@ -147,7 +147,7 @@ def parse_video(video_id: str, background_tasks: BackgroundTasks, mode: str = Qu
                 return result
             if mode == "full":
                 job.status = "processing"
-                job.current_stage = "extracting_keyframes"
+                job.current_stage = "transcribing_asr"
                 job.progress_percent = 5
                 job.error_message = ""
                 job.completed_at = None
@@ -233,19 +233,66 @@ def list_frames(video_id: str):
         return [frame_to_dict(video_id, item) for item in repo.frames_for_video(video_id)]
 
 
+@router.get("/{video_id}/semantic-frames")
+def get_semantic_frames(video_id: str):
+    with SessionLocal() as session:
+        repo = VideoJobRepository(session)
+        job = repo.get_job(video_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="视频任务不存在")
+        try:
+            report = json.loads(
+                storage_service.get_bytes(
+                    bucket=job.source_bucket,
+                    object_key=semantic_frame_matches_object_key(video_id),
+                ).decode("utf-8", errors="replace")
+            )
+        except Exception:
+            frames = repo.frames_for_video(video_id)
+            tree = read_latest_transcript_tree(session, video_id)
+            sections = ((tree.get("tree") or {}).get("sections") or []) if isinstance(tree, dict) else []
+            return {
+                "version": "fallback",
+                "video_id": video_id,
+                "summary": {
+                    "raw_frame_count": len(frames),
+                    "candidate_frame_count": 0,
+                    "section_count": len(sections),
+                },
+                "sections": [
+                    {
+                        "index": section.get("index"),
+                        "title": section.get("title") or "",
+                        "text": section.get("text") or "",
+                        "start_seconds": section.get("start_seconds"),
+                        "end_seconds": section.get("end_seconds"),
+                        "start_time": section.get("start_time"),
+                        "end_time": section.get("end_time"),
+                        "visual_operations": section.get("visual_operations") if isinstance(section.get("visual_operations"), list) else [],
+                        "frame_query_matches": [],
+                        "raw_frames": frames_in_section(video_id, frames, section),
+                        "semantic_frames": [],
+                    }
+                    for section in sections
+                    if isinstance(section, dict)
+                ],
+                "candidate_frames": [],
+            }
+        return report
+
+
 @router.get("/{video_id}/frames/{filename}")
 def get_frame(video_id: str, filename: str):
     safe_name = Path(filename).name
     if safe_name != filename or Path(safe_name).suffix.lower() not in {".jpg", ".jpeg", ".png"}:
         raise HTTPException(status_code=400, detail="invalid frame filename")
     object_key = f"videos/{video_id}/frames/{safe_name}"
-    bucket = settings.object_store_bucket if settings.storage_backend == "minio" else "local"
     try:
-        content = storage_service.get_bytes(bucket=bucket, object_key=object_key)
+        content = storage_service.get_bytes(bucket=settings.object_store_bucket, object_key=object_key)
     except FileNotFoundError as exc:
-        raise HTTPException(status_code=404, detail="关键帧不存在") from exc
+        raise HTTPException(status_code=404, detail="鍏抽敭甯т笉瀛樺湪") from exc
     except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"关键帧存储读取失败: {exc}") from exc
+        raise HTTPException(status_code=502, detail=f"鍏抽敭甯у瓨鍌ㄨ鍙栧け璐? {exc}") from exc
     media_type = "image/png" if safe_name.lower().endswith(".png") else "image/jpeg"
     return Response(content=content, media_type=media_type)
 
@@ -262,7 +309,7 @@ def get_latest_wireframe_job(video_id: str):
 def get_video_wireframe_job(video_id: str, job_id: str):
     job = get_wireframe_job(job_id)
     if job is None or job.video_id != video_id:
-        raise HTTPException(status_code=404, detail="线框图任务不存在")
+        raise HTTPException(status_code=404, detail="绾挎鍥句换鍔′笉瀛樺湪")
     return {"video_id": video_id, "job": wireframe_job_to_dict(job)}
 
 
@@ -299,22 +346,10 @@ def get_transcript(video_id: str):
         if job is None:
             raise HTTPException(status_code=404, detail="视频任务不存在")
         if not job.transcript_object_key:
-            return {"text": "", "raw_text": "", "rendered_text": ""}
+            return {"text": "", "rendered_text": ""}
         rendered_key = job.transcript_object_key or transcript_rendered_object_key(video_id)
-        raw_text = read_object_text(job.source_bucket, raw_asr_object_key(video_id))
         rendered_text = read_object_text(job.source_bucket, rendered_key)
-        fallback_text = rendered_text
-        if not rendered_text:
-            rendered_text = fallback_text
-        if not raw_text:
-            raw_text = fallback_text
-        text = rendered_text or raw_text
-        return {
-            "text": text,
-            "raw_text": raw_text,
-            "rendered_text": rendered_text,
-        }
-
+        return {"text": rendered_text, "rendered_text": rendered_text}
 
 @router.get("/{video_id}/markdown", response_class=PlainTextResponse)
 def get_markdown(video_id: str):
@@ -366,12 +401,20 @@ def job_to_dict(job: VideoJob, *, wireframe_count: int = 0) -> dict:
         "status": job.status,
         "progress_percent": job.progress_percent,
         "current_stage": job.current_stage,
+        "stage_processed": job.stage_processed,
+        "stage_total": job.stage_total,
+        "stage_message": job.stage_message or "",
         "error_message": job.error_message or "",
         "duration_ms": job.duration_ms,
         "frame_count": job.frame_count,
         "wireframe_count": wireframe_count,
         "source_bucket": job.source_bucket,
         "source_object_key": job.source_object_key,
+        "analysis_video_bucket": job.analysis_video_bucket,
+        "analysis_video_object_key": job.analysis_video_object_key,
+        "analysis_video_codec": job.analysis_video_codec,
+        "analysis_video_height": job.analysis_video_height,
+        "analysis_video_size_bytes": job.analysis_video_size_bytes,
         "transcript_object_key": job.transcript_object_key,
         "markdown_object_key": job.markdown_object_key,
         "created_at": job.created_at.isoformat() if job.created_at else None,
@@ -398,6 +441,25 @@ def frame_to_dict(video_id: str, frame: VideoFrame) -> dict:
         "selection_details_json": frame.selection_details_json or "{}",
         "matched_section_index": frame.matched_section_index,
     }
+
+
+def frames_in_section(video_id: str, frames: list[VideoFrame], section: dict) -> list[dict]:
+    start = parse_optional_float(section.get("start_seconds"))
+    end = parse_optional_float(section.get("end_seconds"))
+    if start is None or end is None or end <= start:
+        return [frame_to_dict(video_id, frame) for frame in frames]
+    return [
+        frame_to_dict(video_id, frame)
+        for frame in frames
+        if start <= float(frame.timestamp_seconds or frame.timestamp_ms / 1000 or 0) <= end
+    ]
+
+
+def parse_optional_float(value) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def wireframe_to_dict(artifact: dict) -> dict:
@@ -484,3 +546,5 @@ def read_object_text(bucket: str, object_key: str | None) -> str:
         return storage_service.get_bytes(bucket=bucket, object_key=object_key).decode("utf-8", errors="replace")
     except Exception:
         return ""
+
+
