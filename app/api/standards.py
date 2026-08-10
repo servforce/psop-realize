@@ -16,9 +16,18 @@ from sqlalchemy import select
 
 from app.db.session import SessionLocal
 from app.core.config import settings
-from app.models.entities import CallLog, Standard, StandardCrawlItem, StandardCrawlJob, StandardMaterializeJob
+from app.models.entities import (
+    CallLog,
+    Standard,
+    StandardProcessingJob,
+    StandardSearchQuery,
+    StandardSearchResult,
+    StandardSyncItem,
+    StandardSyncJob,
+)
 from app.services.audit import finish_call, logged_call
 from app.services.openstd_crawl import openstd_crawl_service
+from app.services.standard_update import latest_standard_update_job, standard_update_job_to_dict
 from app.services.standards import MARKDOWN_KINDS, standard_markdown_object_key, standard_service
 
 router = APIRouter(prefix="/api/standards", tags=["standards"])
@@ -76,6 +85,22 @@ def list_standards():
         return [standard_to_dict(session, item) for item in standards]
 
 
+@router.get("/active")
+def list_active_standards(limit: int = Query(0, ge=0, le=5000), offset: int = Query(0, ge=0)):
+    with SessionLocal() as session:
+        standards = standard_service.current_effective_standards(session, limit=limit, offset=offset)
+        return [active_standard_to_dict(item) for item in standards]
+
+
+@router.get("/updates/latest")
+def get_latest_standard_update_job():
+    with SessionLocal() as session:
+        job = latest_standard_update_job(session)
+        if job is None:
+            return {"status": "none"}
+        return standard_update_job_to_dict(job)
+
+
 @router.post("/index/rebuild")
 def rebuild_standard_search_index():
     with SessionLocal() as session:
@@ -119,14 +144,14 @@ def rebuild_one_standard_search_index(standard_id: str):
 def search_history(limit: int = 0):
     with SessionLocal() as session:
         statement = (
-            select(CallLog)
-            .where(CallLog.tool_or_endpoint == "POST /api/standards/search")
-            .order_by(CallLog.created_at.desc())
+            select(StandardSearchQuery)
+            .where(StandardSearchQuery.caller_type.in_(("web", "video_match", "api", "mcp")))
+            .order_by(StandardSearchQuery.created_at.desc())
         )
         if limit > 0:
             statement = statement.limit(max(1, min(limit, 1000)))
         rows = session.scalars(statement).all()
-        return [search_log_to_dict(row) for row in rows]
+        return [search_query_to_dict(session, row) for row in rows]
 
 
 @router.post("/openstd/crawl")
@@ -152,7 +177,7 @@ def get_latest_openstd_crawl_job():
 @router.get("/openstd/crawl/{job_id}")
 def get_openstd_crawl_job(job_id: str):
     with SessionLocal() as session:
-        job = session.get(StandardCrawlJob, job_id)
+        job = session.get(StandardSyncJob, job_id)
         if job is None:
             raise HTTPException(status_code=404, detail="openstd crawl job not found")
         return openstd_crawl_service.job_to_dict(session, job)
@@ -161,13 +186,13 @@ def get_openstd_crawl_job(job_id: str):
 @router.get("/openstd/crawl/{job_id}/items")
 def list_openstd_crawl_items(job_id: str, status: str = Query("", alias="status"), limit: int = 100):
     with SessionLocal() as session:
-        job = session.get(StandardCrawlJob, job_id)
+        job = session.get(StandardSyncJob, job_id)
         if job is None:
             raise HTTPException(status_code=404, detail="openstd crawl job not found")
-        statement = select(StandardCrawlItem).where(StandardCrawlItem.job_id == job_id)
+        statement = select(StandardSyncItem).where(StandardSyncItem.job_id == job_id)
         if status:
-            statement = statement.where(StandardCrawlItem.status == status)
-        statement = statement.order_by(StandardCrawlItem.created_at.desc()).limit(max(1, min(limit, 500)))
+            statement = statement.where(StandardSyncItem.status == status)
+        statement = statement.order_by(StandardSyncItem.created_at.desc()).limit(max(1, min(limit, 500)))
         return [openstd_crawl_service.item_to_dict(item) for item in session.scalars(statement).all()]
 
 
@@ -193,12 +218,12 @@ def materialize_standard(standard_id: str, background_tasks: BackgroundTasks):
             standard = session.get(Standard, standard_id)
             if standard is None:
                 raise HTTPException(status_code=404, detail="standard not found")
-            running_job = latest_materialize_job(session, standard_id, statuses={"running"})
+            running_job = latest_processing_job(session, standard_id, statuses={"running"})
             if running_job is not None:
-                result = materialize_job_to_dict(running_job)
+                result = processing_job_to_dict(running_job)
                 finish_call(session, call_id, result)
                 return result
-            job = StandardMaterializeJob(
+            job = StandardProcessingJob(
                 id=uuid.uuid4().hex,
                 standard_id=standard_id,
                 status="running",
@@ -206,11 +231,11 @@ def materialize_standard(standard_id: str, background_tasks: BackgroundTasks):
                 progress_percent=1,
                 message="解析记录已创建，准备解析标准 PDF。",
             )
-            standard.status = "processing"
+            standard.materialize_status = "processing"
             session.add(job)
             session.add(standard)
             session.commit()
-            result = materialize_job_to_dict(job)
+            result = processing_job_to_dict(job)
             background_tasks.add_task(run_standard_materialize_job, standard_id, job.id)
             finish_call(session, call_id, result)
             return result
@@ -219,9 +244,9 @@ def materialize_standard(standard_id: str, background_tasks: BackgroundTasks):
 @router.get("/{standard_id}/materialize-status")
 def get_materialize_status(standard_id: str):
     with SessionLocal() as session:
-        job = latest_materialize_job(session, standard_id)
+        job = latest_processing_job(session, standard_id)
         if job is not None:
-            return materialize_job_to_dict(job)
+            return processing_job_to_dict(job)
     return standard_service.get_materialize_progress(standard_id)
 
 
@@ -267,7 +292,7 @@ def download_standard_markdown_zip(standard_id: str):
 
 
 @router.post("/search")
-def search_standards(query: str = Query(...), limit: int = 5):
+def search_standards(query: str = Query(...), limit: int = Query(settings.standard_search_result_limit, ge=1, le=20)):
     with SessionLocal() as session:
         with logged_call(
             session,
@@ -281,6 +306,10 @@ def search_standards(query: str = Query(...), limit: int = 5):
                 session,
                 matches=result.get("matches") or [],
                 search_id=search_id,
+                query_text=query,
+                caller_type="web",
+                limit=limit,
+                mode=result.get("mode") or "pgvector_overview",
             )
             finish_call(
                 session,
@@ -341,14 +370,53 @@ def standard_to_dict(session, standard: Standard) -> dict:
         "id": standard.id,
         "name": standard.name,
         "code": standard.code,
-        "status": standard.status,
+        "status": standard.materialize_status,
+        "source_status": standard.source_status,
+        "source_status_raw": standard.source_status_raw,
+        "standard_type": standard.standard_type,
+        "standard_category": standard.standard_category,
+        "standard_org": standard.standard_org,
+        "publish_date": standard.publish_date,
+        "effective_date": standard.effective_date,
+        "detail_url": standard.detail_url,
         "source_pdf_bucket": standard.source_pdf_bucket,
         "source_pdf_object_key": standard.source_pdf_object_key,
+        "source_pdf_hash": standard.source_pdf_hash,
+        "source_pdf_size_bytes": standard.source_pdf_size_bytes,
+        "materialize_status": standard.materialize_status,
+        "materialize_error": standard.materialize_error,
+        "materialized_at": standard.materialized_at.isoformat() if standard.materialized_at else None,
         "index_status": standard.index_status,
         "indexed_at": standard.indexed_at.isoformat() if standard.indexed_at else None,
         "index_error": standard.index_error,
-        "artifacts": {kind: standard_markdown_object_key(standard.id, kind) for kind in sorted(MARKDOWN_KINDS)},
+        "artifacts": {
+            kind: getattr(standard, f"{kind}_md_object_key", "") or standard_markdown_object_key(standard.id, kind)
+            for kind in sorted(MARKDOWN_KINDS)
+        },
+        "last_synced_at": standard.last_synced_at.isoformat() if standard.last_synced_at else None,
         "created_at": standard.created_at.isoformat() if standard.created_at else None,
+        "updated_at": standard.updated_at.isoformat() if standard.updated_at else None,
+    }
+
+
+def active_standard_to_dict(standard: Standard) -> dict:
+    return {
+        "id": standard.id,
+        "name": standard.name,
+        "code": standard.code,
+        "standard_type": standard.standard_type,
+        "standard_category": standard.standard_category,
+        "standard_org": standard.standard_org,
+        "source_status": standard.source_status,
+        "source_status_raw": standard.source_status_raw,
+        "publish_date": standard.publish_date,
+        "effective_date": standard.effective_date,
+        "materialize_status": standard.materialize_status,
+        "materialized_at": standard.materialized_at.isoformat() if standard.materialized_at else None,
+        "index_status": standard.index_status,
+        "indexed_at": standard.indexed_at.isoformat() if standard.indexed_at else None,
+        "last_synced_at": standard.last_synced_at.isoformat() if standard.last_synced_at else None,
+        "last_status_checked_at": standard.last_status_checked_at.isoformat() if standard.last_status_checked_at else None,
         "updated_at": standard.updated_at.isoformat() if standard.updated_at else None,
     }
 
@@ -378,23 +446,25 @@ def run_openstd_crawl_job(job_id: str) -> None:
             finish_call(session, call_id, result)
 
 
-def latest_materialize_job(
+def latest_processing_job(
     session,
     standard_id: str,
     *,
     statuses: set[str] | None = None,
-) -> StandardMaterializeJob | None:
-    statement = select(StandardMaterializeJob).where(StandardMaterializeJob.standard_id == standard_id)
+) -> StandardProcessingJob | None:
+    statement = select(StandardProcessingJob).where(StandardProcessingJob.standard_id == standard_id)
     if statuses:
-        statement = statement.where(StandardMaterializeJob.status.in_(statuses))
-    statement = statement.order_by(StandardMaterializeJob.created_at.desc())
+        statement = statement.where(StandardProcessingJob.status.in_(statuses))
+    statement = statement.order_by(StandardProcessingJob.created_at.desc())
     return session.scalars(statement).first()
 
 
-def materialize_job_to_dict(job: StandardMaterializeJob) -> dict:
+def processing_job_to_dict(job: StandardProcessingJob) -> dict:
     return {
         "standard_id": job.standard_id,
         "job_id": job.id,
+        "sync_job_id": job.sync_job_id,
+        "job_type": job.job_type,
         "status": job.status,
         "stage": job.stage,
         "progress_percent": job.progress_percent,
@@ -414,6 +484,51 @@ def parse_log_json(value: str) -> dict[str, Any]:
     except json.JSONDecodeError:
         return {}
     return parsed if isinstance(parsed, dict) else {}
+
+
+def search_query_to_dict(session, row: StandardSearchQuery) -> dict:
+    results = session.scalars(
+        select(StandardSearchResult)
+        .where(StandardSearchResult.query_id == row.id)
+        .order_by(StandardSearchResult.rank.asc())
+    ).all()
+    matches = []
+    for item in results:
+        evidence = []
+        if item.evidence:
+            try:
+                parsed = json.loads(item.evidence)
+                evidence = parsed if isinstance(parsed, list) else [str(parsed)]
+            except json.JSONDecodeError:
+                evidence = [item.evidence]
+        matches.append(
+            {
+                "standard_id": item.standard_id,
+                "index_id": item.index_id,
+                "rank": item.rank,
+                "score": item.score,
+                "decision": item.match_level,
+                "match_level": item.match_level,
+                "reason": item.reason,
+                "evidence": evidence,
+            }
+        )
+    return {
+        "id": row.id,
+        "query": row.query_text,
+        "limit": row.limit,
+        "status": row.status,
+        "created_at": row.created_at.isoformat() if row.created_at else None,
+        "duration_ms": row.duration_ms,
+        "error_message": row.error_message,
+        "mode": row.mode,
+        "embedding_model": row.embedding_model,
+        "embedding_dimensions": row.embedding_dimensions,
+        "match_count": row.result_count,
+        "excluded_count": 0,
+        "matches": matches,
+        "message": "",
+    }
 
 
 def search_log_to_dict(row: CallLog) -> dict:

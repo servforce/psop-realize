@@ -1,6 +1,7 @@
 ﻿const state = {
   videos: [],
   standards: [],
+  activeStandards: [],
   selectedStandardId: null,
   selectedStandardDetail: null,
   activeStandardMarkdownKind: null,
@@ -10,6 +11,7 @@
   standardMarkdownView: "rendered",
   activeStandardView: "directory",
   activeStandardSearchView: "home",
+  lastStandardSearchAt: null,
   selectedVideoId: null,
   activeVideoView: "directory",
   activeVideoTab: "transcript",
@@ -23,6 +25,10 @@
   standardMaterializePoll: null,
   openstdCrawlPoll: null,
   openstdCrawlJob: null,
+  standardUpdatePoll: null,
+  latestStandardUpdate: null,
+  lastStandardUpdateTerminalKey: "",
+  standardUpdateSchedulerEnabled: false,
   logRefreshTimer: null,
   logRefreshInFlight: false,
 };
@@ -35,7 +41,7 @@ const stageText = {
   extracting_keyframes: "正在使用本地 FFmpeg 抽取候选业务帧",
   filtering_frames: "正在进行关键操作时间窗内图像质量过滤",
   deduplicating_frames: "正在进行 HSV+pHash 去重",
-  semantic_matching: "正在调用 qwen3-vl-embedding 进行语义匹配",
+  semantic_matching: "正在进行图索引评分",
   generating_wireframes: "正在筛选业务帧并生成线框图",
   transcribing: "正在调用本地 ASR 模型进行原始转写",
   transcribing_asr: "正在调用本地 ASR 模型进行原始转写",
@@ -63,6 +69,53 @@ const standardMaterializeStageText = {
   failed: "生成失败",
 };
 
+function prepareStandardWorkbenchLayout() {
+  document.querySelector('.sidebar button[data-view="standards"]')?.remove();
+  const standardWorkbenchButton = document.querySelector('.sidebar button[data-view="standardSearch"]');
+  if (standardWorkbenchButton) standardWorkbenchButton.textContent = "标准工作台";
+
+  const controls = document.querySelector(".standard-search-controls");
+  if (!controls) return;
+  const title = controls.querySelector(".video-panel-title");
+  if (title) title.textContent = "标准工作台";
+
+  const searchTitle = document.querySelector(".standard-search-home-page .video-panel-title");
+  if (searchTitle) searchTitle.textContent = "标准工作台";
+  const resultTitle = document.querySelector(".standard-search-result-titlebar .video-panel-title");
+  if (resultTitle) resultTitle.textContent = "标准检索结果";
+
+  document.querySelector(".standard-search-subsection")?.remove();
+  const indexProgress = document.getElementById("standardIndexInfo")?.closest(".standard-progress");
+  indexProgress?.remove();
+  document.getElementById("standardIndexResult")?.remove();
+  const historyPanel = document.getElementById("standardSearchHistory");
+  historyPanel?.previousElementSibling?.remove();
+  historyPanel?.remove();
+
+  const updateSection = document.getElementById("standardUpdateStatus")?.closest(".standard-progress");
+  updateSection?.remove();
+
+  if (!document.getElementById("activeStandardList")) {
+    const section = document.createElement("section");
+    section.className = "active-standard-section";
+    section.innerHTML = `
+      <div class="history-header">
+        <h3>当前有效标准</h3>
+        <button id="reloadActiveStandards" class="secondary small" type="button">刷新列表</button>
+      </div>
+      <div class="active-standard-subtext">
+        <div id="activeStandardCount" class="muted">正在读取当前有效标准。</div>
+        <div id="standardUpdateStatus" class="muted">正在读取最近一次周期更新状态。</div>
+      </div>
+      <div id="activeStandardList" class="panel compact-panel active-standard-list">
+        <div class="muted">正在读取当前有效标准。</div>
+      </div>
+    `;
+    controls.appendChild(section);
+    section.querySelector("#reloadActiveStandards")?.addEventListener("click", loadActiveStandards);
+  }
+}
+
 document.querySelectorAll(".sidebar button").forEach((button) => {
   button.addEventListener("click", () => {
     document.querySelectorAll(".sidebar button").forEach((b) => b.classList.remove("active"));
@@ -76,11 +129,12 @@ document.querySelectorAll(".sidebar button").forEach((button) => {
     if (viewId === "standards") {
       setStandardWorkspaceView("directory");
       loadLatestOpenstdCrawl();
+      loadLatestStandardUpdate();
     }
     if (viewId === "standardSearch") {
       setStandardSearchWorkspaceView("home");
-      loadStandardIndexSummary();
-      loadStandardSearchHistory();
+      loadActiveStandards();
+      loadLatestStandardUpdate();
     }
     if (viewId === "logs") {
       startLogAutoRefresh();
@@ -137,14 +191,12 @@ document.getElementById("standardLatestUpload").addEventListener("click", () => 
   renderStandardList();
 });
 document.getElementById("startOpenstdCrawl")?.addEventListener("click", startOpenstdCrawl);
-document.getElementById("rebuildStandardIndex").addEventListener("click", rebuildStandardIndex);
 document.getElementById("searchStandards").addEventListener("click", () => searchStandards("standardSearchText"));
 document.getElementById("searchStandardsFromResult")?.addEventListener("click", () => searchStandards("standardSearchResultText"));
 document.getElementById("backToStandardSearchHome")?.addEventListener("click", () => {
   syncStandardSearchInputs(document.getElementById("standardSearchResultText")?.value || "");
   setStandardSearchWorkspaceView("home");
 });
-document.getElementById("reloadStandardSearchHistory").addEventListener("click", loadStandardSearchHistory);
 
 const dropZone = document.getElementById("dropZone");
 dropZone.addEventListener("dragover", (event) => {
@@ -641,7 +693,6 @@ function renderSemanticFrameReport(report) {
       <span>候选语义帧：${Number(summary.candidate_frame_count || 0)}</span>
       <span>文本段落：${Number(summary.section_count || sections.length)}</span>
       <span>关键操作：${Number(summary.visual_operation_count || summary.frame_query_count || 0)}</span>
-      <span>模型：${escapeHtml(report.embedding_model || "qwen3-vl-embedding")}</span>
     </div>
     <div class="semantic-section-list">
       ${sections.map(renderSemanticSection).join("")}
@@ -668,7 +719,7 @@ function renderSemanticSection(section) {
         ${rawFrames.length ? `<div class="frames-grid compact-frames-grid">${rawFrames.map((frame) => renderFrameCard(frame, { score: false })).join("")}</div>` : '<div class="empty">该段落时间范围内暂无候选业务帧。</div>'}
       </div>
       <div class="semantic-frame-block">
-        <h4>关键操作相似度复核</h4>
+        <h4>关键操作分数复核</h4>
         ${frameQueryMatches.length ? renderFrameQueryMatches(frameQueryMatches) : (semanticFrames.length ? `<div class="frames-grid semantic-frames-grid">${semanticFrames.map((frame) => renderFrameCard(frame, { score: true })).join("")}</div>` : '<div class="empty">暂无语义帧匹配结果。</div>')}
       </div>
     </section>
@@ -690,9 +741,9 @@ function renderFrameQueryMatches(matches) {
               <strong>${Number(match.operation_index || match.query_index || 0)}. ${escapeHtml(operationText)}</strong>
               ${sourceLabel ? `<em class="frame-query-source ${source === "fallback_title_text" ? "fallback" : ""}">${escapeHtml(sourceLabel)}</em>` : ""}
               ${operationTime ? `<small>${escapeHtml(operationTime)}</small>` : ""}
-              <span>${escapeHtml(match.query_text || match.embedding_text || "")}</span>
+              <span>${escapeHtml(match.query_text || match.graph_query_text || "")}</span>
             </div>
-            ${frames.length ? `<div class="frames-grid semantic-frames-grid">${frames.map((frame) => renderFrameCard(frame, { score: true })).join("")}</div>` : '<div class="empty">该关键操作暂无候选帧相似度。</div>'}
+            ${frames.length ? `<div class="frames-grid semantic-frames-grid">${frames.map((frame) => renderFrameCard(frame, { score: true })).join("")}</div>` : '<div class="empty">该关键操作暂无候选帧分数。</div>'}
           </section>
         `;
       }).join("")}
@@ -710,15 +761,15 @@ function frameQuerySourceLabel(source) {
 function renderFrameCard(frame, options = {}) {
   const url = frame.url || "";
   const timestamp = frame.timestamp_time || formatTimestamp(frame.timestamp_seconds || 0);
-  const similarity = Number(frame.similarity);
-  const scoreText = Number.isFinite(similarity) ? similarity.toFixed(4) : "";
+  const scoreValue = Number(frame.score);
+  const scoreText = Number.isFinite(scoreValue) ? scoreValue.toFixed(4) : "";
   const filterLabel = frame.filter_label || rawFrameFilterLabel(frame.filter_status);
   return `
     <figure class="frame-card">
       <img src="${escapeHtml(url)}" alt="候选业务帧 ${escapeHtml(timestamp)}" loading="lazy" onclick="openImagePreview('${escapeJsString(url)}')" />
       <figcaption>
         <strong>${escapeHtml(timestamp)}</strong>
-        ${options.score ? `<span>相似度：${escapeHtml(scoreText)}</span>` : (filterLabel ? `<span class="frame-filter-label">${escapeHtml(filterLabel)}</span>` : "")}
+        ${options.score ? `<span>分数：${escapeHtml(scoreText)}</span>` : (filterLabel ? `<span class="frame-filter-label">${escapeHtml(filterLabel)}</span>` : "")}
       </figcaption>
     </figure>
   `;
@@ -824,7 +875,7 @@ function updateVideoProgress(video) {
 function applyParseCompletionMessage(mode, video) {
   const messages = {
     full: ["全部工作已完成", "候选业务帧、转写文本、业务帧筛选/线框图和 Markdown 都已完成。"],
-    keyframes: ["语义帧抽取已完成", "已按文本段落输出候选业务帧、语义帧和相似度分数。"],
+    keyframes: ["语义帧抽取已完成", "已按文本段落输出候选业务帧、图索引分数和排序结果。"],
     wireframes: ["业务帧筛选/线框图已完成", "接下来可以生成 Markdown。"],
     transcript: ["转写文本已完成", "已生成最新结构化转写。"],
     markdown: ["Markdown 报告已完成", "可以在 Markdown 标签中查看并复制。"],
@@ -1134,6 +1185,118 @@ function openstdStatusLabel(status) {
   }[status] || "未知状态";
 }
 
+async function loadActiveStandards() {
+  state.activeStandards = await fetchJson("/api/standards/active");
+  renderActiveStandardList();
+  return state.activeStandards;
+}
+
+function renderActiveStandardList() {
+  const count = document.getElementById("activeStandardCount");
+  const list = document.getElementById("activeStandardList");
+  const standards = state.activeStandards || [];
+  if (count) {
+    const latestIndexedAt = latestActiveStandardTime("indexed_at");
+    const latestText = latestIndexedAt ? ` · 最近索引 ${formatBeijingDateTime(latestIndexedAt)}` : "";
+    count.textContent = `当前有效标准 ${standards.length} 条${latestText}`;
+  }
+  if (!list) return;
+  list.innerHTML = standards.map((standard) => `
+    <div class="active-standard-row" title="${escapeHtml(compactDetails([standard.code, standard.name, standard.publish_date ? `发布 ${standard.publish_date}` : ""]))}">
+      <div>
+        <strong>${escapeHtml(standard.code || standard.id || "未知标准号")}</strong>
+        <div class="muted">${escapeHtml(standard.name || "")}</div>
+      </div>
+      <div class="active-standard-meta">
+        ${standard.publish_date ? `<span>发布 ${escapeHtml(standard.publish_date)}</span>` : ""}
+        ${standard.effective_date ? `<span>实施 ${escapeHtml(standard.effective_date)}</span>` : ""}
+        ${standard.indexed_at ? `<span>索引 ${escapeHtml(formatBeijingDateTime(standard.indexed_at))}</span>` : ""}
+      </div>
+    </div>
+  `).join("") || "<div class='muted'>暂无当前有效标准。</div>";
+}
+
+async function loadLatestStandardUpdate() {
+  const target = document.getElementById("standardUpdateStatus");
+  try {
+    const job = await fetchJson("/api/standards/updates/latest");
+    state.latestStandardUpdate = job && job.status !== "none" ? job : null;
+    renderStandardUpdateStatus(job);
+    if (isStandardUpdateTerminal(job)) {
+      await refreshAfterStandardUpdateTerminal(job);
+    }
+  } catch (error) {
+    if (target) target.innerHTML = `<div class="error">读取周期更新状态失败：${escapeHtml(error.message)}</div>`;
+  }
+}
+
+function startStandardUpdatePolling() {
+  if (state.standardUpdatePoll || !state.standardUpdateSchedulerEnabled) return;
+  state.standardUpdatePoll = setInterval(loadLatestStandardUpdate, 30000);
+}
+
+async function loadRuntimeConfig() {
+  try {
+    const config = await fetchJson("/api/config");
+    state.standardUpdateSchedulerEnabled = Boolean(config?.standard_update_scheduler_enabled);
+  } catch {
+    state.standardUpdateSchedulerEnabled = false;
+  }
+}
+
+async function refreshAfterStandardUpdateTerminal(job) {
+  const terminalKey = `${job.id || ""}:${job.status || ""}:${job.completed_at || job.updated_at || ""}`;
+  if (!terminalKey || state.lastStandardUpdateTerminalKey === terminalKey) return;
+  state.lastStandardUpdateTerminalKey = terminalKey;
+  await loadActiveStandards().catch(() => []);
+  if (!state.selectedStandardId || state.activeStandardView !== "detail") return;
+  try {
+    const kind = state.activeStandardMarkdownKind || "overview";
+    const standard = await fetchJson(`/api/standards/${state.selectedStandardId}`);
+    state.selectedStandardDetail = standard;
+    state.activeStandardMarkdownKind = kind;
+    renderStandardDetail(standard);
+    await refreshStandardMaterializeStatus(standard.id);
+    await loadMarkdown(standard.id, kind);
+  } catch {
+    // The selected standard may have been removed from the active workspace; keep the current view stable.
+  }
+}
+
+function renderStandardUpdateStatus(job) {
+  const target = document.getElementById("standardUpdateStatus");
+  if (!target) return;
+  if (!job || job.status === "none") {
+    target.textContent = "周期更新：暂无记录。";
+    return;
+  }
+  const completed = job.completed_at ? formatBeijingDateTime(job.completed_at) : "未完成";
+  const current = job.current_item ? `当前：${job.current_item}` : "当前：暂无";
+  const failed = Number(job.failed_count || 0)
+    + Number(job.download_failed_count || 0)
+    + Number(job.materialize_failed_count || 0)
+    + Number(job.index_failed_count || 0);
+  const counts = `发现 ${Number(job.total_discovered || 0)} · 新增 ${Number(job.new_count || 0)} · 更新 ${Number(job.updated_count || 0)} · 失败 ${failed}`;
+  const completedText = isStandardUpdateTerminal(job) ? ` · 完成 ${completed}` : "";
+  const currentText = job.status === "running" || job.status === "queued" ? ` · ${current}` : "";
+  target.textContent = `周期更新：${standardUpdateStatusLabel(job.status)} · ${counts}${completedText}${currentText}`;
+}
+
+function isStandardUpdateTerminal(job) {
+  return ["completed", "completed_with_errors", "failed", "skipped_locked"].includes(job?.status);
+}
+
+function standardUpdateStatusLabel(status) {
+  return {
+    queued: "周期更新等待启动",
+    running: "周期更新正在执行",
+    completed: "周期更新完成",
+    completed_with_errors: "周期更新完成，有失败项",
+    failed: "周期更新失败",
+    skipped_locked: "周期更新因锁占用跳过",
+  }[status] || status || "未知状态";
+}
+
 async function loadStandards() {
   state.standards = await fetchJson("/api/standards");
   renderStandardList();
@@ -1347,23 +1510,38 @@ async function rebuildStandardIndex() {
 async function loadStandardIndexSummary() {
   const resultTarget = document.getElementById("standardIndexResult");
   if (!resultTarget) return;
-  const indexed = state.standards.filter((item) => item.index_status === "indexed").length;
-  const failed = state.standards.filter((item) => item.index_status === "failed").length;
-  setStandardIndexProgress(`已索引 ${indexed} 个标准`, false, indexed ? 100 : 0);
-  resultTarget.innerHTML = renderStandardIndexSummary(
-    {
-      indexed_count: indexed,
-      failed_count: failed,
-      failed: state.standards
-        .filter((item) => item.index_status === "failed")
-        .map((item) => ({ standard_id: item.id, standard_name: item.name, reason: item.index_error || "" })),
-    },
-    "当前向量索引状态",
-  );
+  try {
+    if (!state.activeStandards.length) {
+      await loadActiveStandards();
+    }
+    const total = state.activeStandards.length;
+    setStandardIndexProgress(`当前有效标准 ${total} 个`, false, total ? 100 : 0);
+    resultTarget.innerHTML = renderStandardIndexSummary(
+      {
+        scope: "active",
+        total_count: total,
+        indexed_count: total,
+        latest_indexed_at: latestActiveStandardTime("indexed_at"),
+        latest_synced_at: latestActiveStandardTime("last_synced_at"),
+      },
+      "当前有效标准",
+    );
+  } catch (error) {
+    setStandardIndexProgress("读取当前有效标准失败", false, 0);
+    resultTarget.innerHTML = `<div class="error">读取当前有效标准失败：${escapeHtml(error.message)}</div>`;
+  }
 }
 
 function renderStandardIndexSummary(result, title) {
   const failed = result.failed || [];
+  if (result.scope === "active") {
+    return `
+      <h3>${escapeHtml(title)}</h3>
+      <p class="muted">当前有效标准：${Number(result.total_count || 0)} 个</p>
+      ${result.latest_indexed_at ? `<p class="muted">最近索引时间：${escapeHtml(formatBeijingDateTime(result.latest_indexed_at))}</p>` : ""}
+      ${result.latest_synced_at ? `<p class="muted">最近同步时间：${escapeHtml(formatBeijingDateTime(result.latest_synced_at))}</p>` : ""}
+    `;
+  }
   return `
     <h3>${escapeHtml(title)}</h3>
     <p class="muted">已索引：${Number(result.indexed_count || 0)} 个 · 失败：${Number(result.failed_count || 0)} 个</p>
@@ -1378,6 +1556,20 @@ function renderStandardIndexSummary(result, title) {
           </div>`).join("")}
       </div>` : "<h4>失败的标准</h4><div class='muted'>无</div>"}
   `;
+}
+
+function latestActiveStandardTime(field) {
+  let latest = "";
+  let latestTime = 0;
+  for (const standard of state.activeStandards || []) {
+    const value = standard[field];
+    if (!value) continue;
+    const time = parseBackendDateAsUtc(value).getTime();
+    if (Number.isNaN(time) || time <= latestTime) continue;
+    latest = value;
+    latestTime = time;
+  }
+  return latest;
 }
 
 async function materializeStandards(ids) {
@@ -1886,24 +2078,14 @@ async function searchStandards(sourceInputId = "standardSearchText") {
   if (!query) return alert("请输入检索文本");
   syncStandardSearchInputs(query);
   setStandardSearchWorkspaceView("result");
+  state.lastStandardSearchAt = new Date();
   const resultTarget = document.getElementById("standardSearchResult");
-  resultTarget.innerHTML = "<div class='muted'>正在进行标准向量检索...</div>";
-  setStandardSearchProgress("准备检索：向量化输入文本", true, 12);
-  const progressTimers = [
-    setTimeout(() => setStandardSearchProgress("正在调用 embedding 模型", true, 38), 500),
-    setTimeout(() => setStandardSearchProgress("正在通过 pgvector 匹配标准索引", true, 68), 1800),
-  ];
+  resultTarget.innerHTML = "<div class='muted'>正在检索标准...</div>";
   try {
-    const result = await fetchJson(`/api/standards/search?query=${encodeURIComponent(query)}&limit=10`, { method: "POST" });
-    progressTimers.forEach((timer) => clearTimeout(timer));
-    setStandardSearchProgress(`检索完成：${(result.matches || []).length} 个匹配结果`, false, 100);
+    const result = await fetchJson(`/api/standards/search?query=${encodeURIComponent(query)}`, { method: "POST" });
     resultTarget.innerHTML = renderStandardSearchResult(result);
-    loadStandardSearchHistory();
   } catch (error) {
-    progressTimers.forEach((timer) => clearTimeout(timer));
-    setStandardSearchProgress("检索失败", false, 0);
     resultTarget.innerHTML = `<div class="error">检索失败：${escapeHtml(error.message)}</div>`;
-    loadStandardSearchHistory();
   }
 }
 
@@ -1958,17 +2140,6 @@ window.reuseStandardSearchQuery = (encodedQuery) => {
   document.getElementById("standardSearchText").focus();
 };
 
-function setStandardSearchProgress(message, indeterminate = false, percent = 0) {
-  const width = `${Math.max(0, Math.min(100, Number(percent || 0)))}%`;
-  document.querySelectorAll("[data-standard-search-info]").forEach((info) => {
-    info.textContent = message;
-  });
-  document.querySelectorAll("[data-standard-search-progress-bar]").forEach((bar) => {
-    bar.classList.toggle("indeterminate", Boolean(indeterminate));
-    bar.style.width = width;
-  });
-}
-
 function setStandardIndexProgress(message, indeterminate = false, percent = 0) {
   const info = document.getElementById("standardIndexInfo");
   const bar = document.getElementById("standardIndexProgressBar");
@@ -1980,16 +2151,18 @@ function setStandardIndexProgress(message, indeterminate = false, percent = 0) {
 
 function renderStandardSearchResult(result) {
   const matches = result.matches || [];
-  const strong = matches.filter((item) => item.decision === "应返回");
-  const weak = matches.filter((item) => item.decision !== "应返回");
+  const searchedAt = state.lastStandardSearchAt ? formatDateTime(state.lastStandardSearchAt) : "刚刚";
+  const resultCount = matches.length;
   return `
-    <h3>标准检索结果</h3>
-    <p class="muted">${escapeHtml(result.mode || "")}${result.embedding_model ? ` · ${escapeHtml(result.embedding_model)} · ${Number(result.embedding_dimensions || 0)} 维` : ""}</p>
+    <div class="standard-search-result-summary">
+      <div>
+        <h3>标准检索结果</h3>
+        <p class="muted">检索于 ${escapeHtml(searchedAt)}</p>
+      </div>
+      <div class="standard-search-result-count">${escapeHtml(String(resultCount))} 条结果</div>
+    </div>
     ${result.message ? `<p class="error">${escapeHtml(result.message)}</p>` : ""}
-    <h4>强匹配</h4>
-    <div class="search-result-list">${strong.map((item) => renderSearchStandardCard(item, "strong")).join("") || "<div class='muted'>暂无强匹配</div>"}</div>
-    <h4>候选匹配</h4>
-    <div class="search-result-list">${weak.map((item) => renderSearchStandardCard(item, "candidate")).join("") || "<div class='muted'>暂无候选匹配</div>"}</div>
+    <div class="search-result-list">${matches.map((item) => renderSearchStandardCard(item, "result")).join("") || "<div class='muted'>暂无检索结果</div>"}</div>
   `;
 }
 
@@ -2003,21 +2176,49 @@ function renderSearchStandardCard(item, group) {
   }).join("");
   const downloadHref = standardId ? `/api/standards/${encodeURIComponent(standardId)}/markdown.zip` : "#";
   const downloadClass = `button-link small-download${standardId ? "" : " disabled"}`;
+  const standardNumber = item.standard_number || item.code || "";
+  const resultMeta = compactDetails([
+    item.decision || "",
+    item.match_level || "",
+    standardNumber,
+    item.publish_date ? `发布 ${item.publish_date}` : "",
+    item.effective_date ? `实施 ${item.effective_date}` : "",
+    `score ${Number(item.score || 0).toFixed(2)}`,
+    item.indexed_at ? `索引 ${formatBeijingDateTime(item.indexed_at)}` : "",
+  ]);
   return `
     <div class="search-standard-card">
       <div class="search-standard-head">
         <div>
           <strong>${escapeHtml(item.standard_name || standardId || "未知标准")}</strong>
-          <div class="muted">${escapeHtml(item.decision || "")} · ${escapeHtml(item.match_level || "")} · score ${Number(item.score || 0).toFixed(2)} · ${escapeHtml(standardId)}</div>
+          <div class="muted">${escapeHtml(resultMeta || standardId)}</div>
         </div>
-        <a class="${downloadClass}" href="${downloadHref}">下载全部</a>
+        <div class="markdown-actions">
+          <button id="${previewId}-toggle" class="secondary small" type="button" onclick="toggleSearchStandardMarkdown('${escapeJsString(standardId)}','${previewId}')">展开</button>
+          <a class="${downloadClass}" href="${downloadHref}">下载全部</a>
+        </div>
       </div>
       ${item.reason ? `<p>${escapeHtml(item.reason)}</p>` : ""}
       ${(item.evidence || []).length ? `<ul>${item.evidence.map((e) => `<li>${escapeHtml(e)}</li>`).join("")}</ul>` : ""}
-      <div class="toolbar compact">${buttons}</div>
-      <pre id="${previewId}" class="search-markdown-preview">请选择一个 Markdown 文档查看内容。</pre>
+      <div id="${previewId}-body" class="search-markdown-body hidden">
+        <div class="toolbar compact">${buttons}</div>
+        <pre id="${previewId}" class="search-markdown-preview">请选择一个 Markdown 文档查看内容。</pre>
+      </div>
     </div>`;
 }
+
+window.toggleSearchStandardMarkdown = async (standardId, previewId) => {
+  const body = document.getElementById(`${previewId}-body`);
+  const button = document.getElementById(`${previewId}-toggle`);
+  const preview = document.getElementById(previewId);
+  if (!body || !button || !preview) return;
+  const shouldOpen = body.classList.contains("hidden");
+  body.classList.toggle("hidden", !shouldOpen);
+  button.textContent = shouldOpen ? "收起" : "展开";
+  if (shouldOpen && standardId && !preview.dataset.loadedKind) {
+    await previewSearchMarkdown(standardId, "overview", previewId);
+  }
+};
 
 window.previewSearchMarkdown = async (standardId, kind, previewId) => {
   const preview = document.getElementById(previewId);
@@ -2036,6 +2237,7 @@ window.previewSearchMarkdown = async (standardId, kind, previewId) => {
       return r.text();
     });
     preview.textContent = markdown || "暂无内容。";
+    preview.dataset.loadedKind = kind;
   } catch (error) {
     preview.textContent = `加载失败：${error.message}`;
   }
@@ -2351,7 +2553,7 @@ function videoProgressLabel(task) {
   if (stage === "generating_markdown") return "生成中";
   if (stage === "generating_wireframes") return "生成中";
   if (stage === "extracting_keyframes") return "密集抽帧中";
-  if (stage === "semantic_matching") return "语义匹配中";
+  if (stage === "semantic_matching") return "图索引评分中";
   if (stage === "uploaded") return "等待中";
   return isVideoTaskIndeterminate(task) ? "处理中" : "等待中";
 }
@@ -2474,7 +2676,18 @@ function escapeJsString(value) {
   return String(value ?? "").replace(/\\/g, "\\\\").replace(/'/g, "\\'");
 }
 
-loadVideos();
-loadStandards();
-loadLatestOpenstdCrawl();
+async function bootstrapApp() {
+  await loadRuntimeConfig();
+  prepareStandardWorkbenchLayout();
+  loadVideos();
+  loadStandards();
+  loadActiveStandards();
+  loadLatestOpenstdCrawl();
+  await loadLatestStandardUpdate();
+  startStandardUpdatePolling();
+}
+
+bootstrapApp().catch((error) => {
+  console.error("failed to bootstrap app", error);
+});
 

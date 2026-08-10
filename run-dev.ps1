@@ -20,4 +20,4 @@ if (Test-Path ".env") {
 }
 
 $env:PYTHONPATH = $root
-python -m uvicorn app.main:app --host 127.0.0.1 --port 8090 --reload
+python -m uvicorn app.main:app --host 127.0.0.1 --port 8090

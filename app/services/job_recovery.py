@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models.entities import CallLog, Standard, StandardMaterializeJob, VideoJob, WireframeJob
+from app.models.entities import CallLog, Standard, StandardProcessingJob, VideoJob, WireframeJob
 
 
 INTERRUPTED_JOB_MESSAGE = "服务中断，后台任务未完成，请重新发起解析。"
@@ -14,7 +14,7 @@ INTERRUPTED_JOB_MESSAGE = "服务中断，后台任务未完成，请重新发�
 def fail_interrupted_background_jobs(session: Session) -> dict[str, int]:
     now = datetime.now(timezone.utc)
     counts = {
-        "standard_materialize_jobs": _fail_standard_materialize_jobs(session, now),
+        "standard_processing_jobs": _fail_standard_processing_jobs(session, now),
         "standards": _fail_processing_standards(session, now),
         "video_jobs": _fail_video_jobs(session, now),
         "wireframe_jobs": _fail_wireframe_jobs(session, now),
@@ -24,9 +24,9 @@ def fail_interrupted_background_jobs(session: Session) -> dict[str, int]:
     return counts
 
 
-def _fail_standard_materialize_jobs(session: Session, now: datetime) -> int:
+def _fail_standard_processing_jobs(session: Session, now: datetime) -> int:
     jobs = session.scalars(
-        select(StandardMaterializeJob).where(StandardMaterializeJob.status == "running")
+        select(StandardProcessingJob).where(StandardProcessingJob.status == "running")
     ).all()
     for job in jobs:
         job.status = "failed"
@@ -41,9 +41,10 @@ def _fail_standard_materialize_jobs(session: Session, now: datetime) -> int:
 
 
 def _fail_processing_standards(session: Session, now: datetime) -> int:
-    standards = session.scalars(select(Standard).where(Standard.status == "processing")).all()
+    standards = session.scalars(select(Standard).where(Standard.materialize_status == "processing")).all()
     for standard in standards:
-        standard.status = "failed"
+        standard.materialize_status = "failed"
+        standard.materialize_error = INTERRUPTED_JOB_MESSAGE
         standard.updated_at = now
         session.add(standard)
     return len(standards)

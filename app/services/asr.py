@@ -11,7 +11,7 @@ from app.core.config import settings
 from app.services.audit import finish_call, logged_call_with_session
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class LocalAsrResult:
     text: str
     language: str | None = None

@@ -17,7 +17,7 @@ from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
-from app.models.entities import Standard, StandardMaterializeJob, StandardMatch
+from app.models.entities import Standard, StandardProcessingJob, StandardSearchQuery, StandardSearchResult
 from app.services.audit import finish_call, logged_call_with_session
 from app.services.storage import StorageService, storage_service
 
@@ -37,6 +37,15 @@ ROLE_BY_KIND = {
 }
 FRONT_MATTER_RE = re.compile(r"\A\s*---\s*\n(?P<front>.*?)\n---\s*(?:\n|$)", re.DOTALL)
 STANDARD_SEARCH_INDEX_KIND = "overview"
+CURRENT_EFFECTIVE_STANDARD_SOURCE_STATUS = "active"
+CURRENT_EFFECTIVE_STANDARD_MATERIALIZE_STATUS = "materialized"
+CURRENT_EFFECTIVE_STANDARD_INDEX_STATUS = "indexed"
+MATERIALIZE_LENGTH_ERROR_STATUS = "length_error"
+LENGTH_FINISH_REASONS = {"length", "max_tokens", "token_limit", "output_token_limit", "max_output_tokens"}
+
+
+class MaterializeLengthError(RuntimeError):
+    """Raised when a standard materialization step hits an input or output length limit."""
 
 
 def standard_markdown_object_key(standard_id: str, kind: str) -> str:
@@ -57,6 +66,7 @@ class MarkdownGenerator(Protocol):
         source_pdf: str,
         pdf_path: Path,
         progress: Callable[[str, int, str], None] | None = None,
+        timeout_seconds: float | None = None,
     ) -> MaterializedStandard:
         ...
 
@@ -169,6 +179,7 @@ def build_four_markdowns(
     pdf_path: Path,
     generator: MarkdownGenerator | None = None,
     progress: Callable[[str, int, str], None] | None = None,
+    timeout_seconds: float | None = None,
 ) -> MaterializedStandard:
     qwen_generator = generator or QwenMarkdownGenerator.from_settings()
     return qwen_generator.generate(
@@ -176,6 +187,7 @@ def build_four_markdowns(
         source_pdf=source_pdf,
         pdf_path=pdf_path,
         progress=progress,
+        timeout_seconds=timeout_seconds,
     )
 
 
@@ -189,6 +201,10 @@ class QwenMarkdownGenerator:
         temperature: float,
         top_p: float,
         max_tokens: int,
+        body_max_tokens: int,
+        structure_max_tokens: int,
+        logic_max_tokens: int,
+        overview_max_tokens: int,
         timeout_seconds: float,
         max_input_chars: int,
         file_upload_purpose: str,
@@ -200,6 +216,12 @@ class QwenMarkdownGenerator:
         self.temperature = temperature
         self.top_p = top_p
         self.max_tokens = max_tokens
+        self.max_tokens_by_kind = {
+            "body": body_max_tokens,
+            "structure": structure_max_tokens,
+            "logic": logic_max_tokens,
+            "overview": overview_max_tokens,
+        }
         self.timeout_seconds = timeout_seconds
         self.max_input_chars = max_input_chars
         self.file_upload_purpose = file_upload_purpose
@@ -218,6 +240,10 @@ class QwenMarkdownGenerator:
             temperature=settings.qwen_text_temperature,
             top_p=settings.qwen_text_top_p,
             max_tokens=settings.qwen_text_max_tokens,
+            body_max_tokens=settings.qwen_standard_body_max_tokens,
+            structure_max_tokens=settings.qwen_standard_structure_max_tokens,
+            logic_max_tokens=settings.qwen_standard_logic_max_tokens,
+            overview_max_tokens=settings.qwen_standard_overview_max_tokens,
             timeout_seconds=settings.qwen_text_timeout_seconds,
             max_input_chars=settings.qwen_text_max_input_chars,
             file_upload_purpose=settings.qwen_text_file_upload_purpose,
@@ -230,7 +256,9 @@ class QwenMarkdownGenerator:
         source_pdf: str,
         pdf_path: Path,
         progress: Callable[[str, int, str], None] | None = None,
+        timeout_seconds: float | None = None,
     ) -> MaterializedStandard:
+        effective_timeout_seconds = timeout_seconds if timeout_seconds is not None else self.timeout_seconds
         standard_id = standard_id_from_name(source_pdf)
         standard_number = guess_standard_number(source_pdf, standard_name)
 
@@ -243,6 +271,7 @@ class QwenMarkdownGenerator:
             standard_number=standard_number,
             source_pdf=source_pdf,
             pdf_text=pdf_text,
+            timeout_seconds=effective_timeout_seconds,
         )
         body = ensure_markdown_front_matter(
             body,
@@ -260,6 +289,7 @@ class QwenMarkdownGenerator:
             standard_number=standard_number,
             source_pdf=source_pdf,
             standard_body=body,
+            timeout_seconds=effective_timeout_seconds,
         )
         structure = ensure_markdown_front_matter(
             structure,
@@ -277,6 +307,7 @@ class QwenMarkdownGenerator:
             standard_number=standard_number,
             source_pdf=source_pdf,
             standard_body=body,
+            timeout_seconds=effective_timeout_seconds,
         )
         logic = ensure_markdown_front_matter(
             logic,
@@ -294,6 +325,7 @@ class QwenMarkdownGenerator:
             standard_number=standard_number,
             source_pdf=source_pdf,
             standard_body=body,
+            timeout_seconds=effective_timeout_seconds,
         )
         overview = ensure_markdown_front_matter(
             overview,
@@ -311,8 +343,21 @@ class QwenMarkdownGenerator:
             markdown={"body": body, "structure": structure, "logic": logic, "overview": overview},
         )
 
-    def _generate_body(self, *, standard_name: str, standard_number: str, source_pdf: str, pdf_text: str) -> str:
-        body_context = clip_text(pdf_text, self.max_input_chars)
+    def _generate_body(
+        self,
+        *,
+        standard_name: str,
+        standard_number: str,
+        source_pdf: str,
+        pdf_text: str,
+        timeout_seconds: float | None = None,
+    ) -> str:
+        body_context = require_text_within_input_limit(
+            kind="body",
+            source_label="pdf_text",
+            text=pdf_text,
+            max_chars=self.max_input_chars,
+        )
         prompt = f"""请基于下面提供的 PDF 原文抽取文本，生成 `standard_body.md`。
 
 固定要求：
@@ -351,7 +396,12 @@ document_role: "standard_body"
 PDF 原文抽取文本：
 {body_context}
 """
-        return self._chat(prompt)
+        return self._chat(
+            prompt,
+            kind="body",
+            max_tokens=self.max_tokens_by_kind["body"],
+            timeout_seconds=timeout_seconds,
+        )
 
     def _upload_pdf_for_model(self, *, pdf_path: Path, source_pdf: str) -> str:
         headers = {"Authorization": f"Bearer {self.api_key}"}
@@ -378,6 +428,7 @@ PDF 原文抽取文本：
         standard_number: str,
         source_pdf: str,
         standard_body: str,
+        timeout_seconds: float | None = None,
     ) -> str:
         if kind == "structure":
             task = """生成 `standard_structure.md`。
@@ -480,7 +531,12 @@ PDF 原文抽取文本：
             raise ValueError(f"Unsupported generated markdown kind: {kind}")
 
         document_role = ROLE_BY_KIND[kind]
-        body_context = clip_text(standard_body, self.max_input_chars)
+        body_context = require_text_within_input_limit(
+            kind=kind,
+            source_label="standard_body.md",
+            text=standard_body,
+            max_chars=self.max_input_chars,
+        )
         standard_id = standard_id_from_name(source_pdf)
         prompt = f"""请基于下面的 `standard_body.md` 内容，{task}
 
@@ -506,9 +562,22 @@ schema_version: "simple-1.0"
 standard_body.md：
 {body_context}
 """
-        return self._chat(prompt)
+        return self._chat(
+            prompt,
+            kind=kind,
+            max_tokens=self.max_tokens_by_kind[kind],
+            timeout_seconds=timeout_seconds,
+        )
 
-    def _chat(self, prompt: str, *, file_references: list[str] | None = None) -> str:
+    def _chat(
+        self,
+        prompt: str,
+        *,
+        kind: str,
+        max_tokens: int,
+        file_references: list[str] | None = None,
+        timeout_seconds: float | None = None,
+    ) -> str:
         messages = [
             {
                 "role": "system",
@@ -523,7 +592,8 @@ standard_body.md：
             "messages": messages,
             "temperature": self.temperature,
             "top_p": self.top_p,
-            "max_tokens": self.max_tokens,
+            "max_tokens": max_tokens,
+            "enable_thinking": False,
         }
         headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
         url = self._chat_completions_url()
@@ -533,23 +603,33 @@ standard_body.md：
             request={
                 "model": self.model,
                 "endpoint": url,
+                "markdown_kind": kind,
                 "input_chars": sum(len(str(item.get("content", ""))) for item in messages),
-                "max_tokens": self.max_tokens,
+                "max_tokens": max_tokens,
             },
         ) as (audit_session, call_id):
+            effective_timeout = timeout_seconds if timeout_seconds is not None else self.timeout_seconds
             if self.http_client is not None:
-                response = self.http_client.post(url, headers=headers, json=payload, timeout=self.timeout_seconds)
+                response = self.http_client.post(url, headers=headers, json=payload, timeout=effective_timeout)
             else:
-                with httpx.Client(timeout=self.timeout_seconds, trust_env=False) as client:
+                with httpx.Client(timeout=effective_timeout, trust_env=False) as client:
                     response = client.post(url, headers=headers, json=payload)
             response.raise_for_status()
             data = response.json()
             content = extract_chat_content(data)
+            finish_reason = extract_finish_reason(data)
+            if is_length_finish_reason(finish_reason):
+                raise MaterializeLengthError(
+                    f"{MARKDOWN_FILENAMES.get(kind, kind)} output length error: "
+                    f"finish_reason={finish_reason}, max_tokens={max_tokens}"
+                )
             finish_call(
                 audit_session,
                 call_id,
                 {
                     "model": self.model,
+                    "markdown_kind": kind,
+                    "finish_reason": finish_reason,
                     "usage": data.get("usage", {}),
                     "output_chars": len(content),
                 },
@@ -591,6 +671,28 @@ def clip_text(text: str, max_chars: int) -> str:
         return text
     omitted = len(text) - max_chars
     return text[:max_chars].rstrip() + f"\n\n[系统提示：由于输入长度限制，后续 {omitted} 个字符未传入本次模型调用。]"
+
+
+def require_text_within_input_limit(*, kind: str, source_label: str, text: str, max_chars: int) -> str:
+    if max_chars <= 0 or len(text) <= max_chars:
+        return text
+    raise MaterializeLengthError(
+        f"{MARKDOWN_FILENAMES.get(kind, kind)} input length error: "
+        f"{source_label} chars {len(text)} exceeds QWEN_TEXT_MAX_INPUT_CHARS={max_chars}"
+    )
+
+
+def extract_finish_reason(data: dict[str, Any]) -> str:
+    try:
+        reason = data["choices"][0].get("finish_reason")
+    except (KeyError, IndexError, TypeError):
+        return ""
+    return str(reason or "")
+
+
+def is_length_finish_reason(reason: str) -> bool:
+    normalized = str(reason or "").strip().lower()
+    return normalized in LENGTH_FINISH_REASONS
 
 
 def extract_chat_content(data: dict[str, Any]) -> str:
@@ -902,7 +1004,7 @@ class StandardService:
     ) -> None:
         if not job_id:
             return
-        job = session.get(StandardMaterializeJob, job_id)
+        job = session.get(StandardProcessingJob, job_id)
         if job is None:
             return
         job.status = status
@@ -911,6 +1013,8 @@ class StandardService:
         job.message = message
         job.error_message = error
         job.updated_at = datetime.now(timezone.utc)
+        if status == "running" and job.started_at is None:
+            job.started_at = datetime.now(timezone.utc)
         if status in {"completed", "failed"}:
             job.completed_at = datetime.now(timezone.utc)
         session.add(job)
@@ -943,6 +1047,37 @@ class StandardService:
 
         return update
 
+    def current_effective_standard_statement(
+        self,
+        *,
+        limit: int = 0,
+        offset: int = 0,
+    ):
+        statement = (
+            select(Standard)
+            .where(
+                Standard.source_status == CURRENT_EFFECTIVE_STANDARD_SOURCE_STATUS,
+                Standard.materialize_status == CURRENT_EFFECTIVE_STANDARD_MATERIALIZE_STATUS,
+                Standard.index_status == CURRENT_EFFECTIVE_STANDARD_INDEX_STATUS,
+            )
+            .order_by(Standard.updated_at.desc(), Standard.created_at.desc(), Standard.id.asc())
+        )
+        if offset > 0:
+            statement = statement.offset(offset)
+        if limit > 0:
+            statement = statement.limit(limit)
+        return statement
+
+    def current_effective_standards(
+        self,
+        session: Session,
+        *,
+        limit: int = 0,
+        offset: int = 0,
+    ) -> list[Standard]:
+        statement = self.current_effective_standard_statement(limit=limit, offset=offset)
+        return session.scalars(statement).all()
+
     def upload_pdf(self, session: Session, *, pdf_path: Path, filename: str, media_type: str) -> dict:
         safe_name = safe_filename(filename)
         if Path(safe_name).suffix.lower() != ".pdf":
@@ -962,31 +1097,53 @@ class StandardService:
                 name=Path(safe_name).stem,
                 source_pdf_bucket=stored.bucket,
                 source_pdf_object_key=stored.object_key,
-                status="registered",
+                source_pdf_hash=stored.checksum,
+                source_pdf_size_bytes=stored.size_bytes,
+                source_status="active",
+                materialize_status="not_started",
+                index_status="not_indexed",
+                fingerprint=stored.checksum,
+                last_synced_at=datetime.now(timezone.utc),
             )
         else:
             standard.name = Path(safe_name).stem
             standard.source_pdf_bucket = stored.bucket
             standard.source_pdf_object_key = stored.object_key
-            standard.status = "registered"
+            standard.source_pdf_hash = stored.checksum
+            standard.source_pdf_size_bytes = stored.size_bytes
+            standard.materialize_status = "not_started"
+            standard.materialize_error = ""
             standard.index_status = "not_indexed"
             standard.indexed_at = None
             standard.index_error = ""
+            standard.fingerprint = stored.checksum
+            standard.last_synced_at = datetime.now(timezone.utc)
         session.add(standard)
         session.commit()
         return {
             "standard_id": standard.id,
             "name": standard.name,
-            "status": standard.status,
+            "status": standard.materialize_status,
             "bucket": stored.bucket,
             "object_key": stored.object_key,
             "size_bytes": stored.size_bytes,
         }
 
-    def materialize(self, session: Session, standard_id: str, *, job_id: str | None = None) -> dict:
+    def materialize(
+        self,
+        session: Session,
+        standard_id: str,
+        *,
+        job_id: str | None = None,
+        timeout_seconds: float | None = None,
+    ) -> dict:
         standard = session.get(Standard, standard_id)
         if standard is None:
             raise ValueError(f"Standard not found: {standard_id}")
+        standard.materialize_status = "processing"
+        standard.materialize_error = ""
+        session.add(standard)
+        session.commit()
         self._set_materialize_progress(
             session,
             standard_id,
@@ -1026,6 +1183,7 @@ class StandardService:
                     source_pdf=Path(standard.source_pdf_object_key).name,
                     pdf_path=pdf_path,
                     progress=self._progress_callback(standard_id, session=session, job_id=job_id),
+                    timeout_seconds=timeout_seconds,
                 )
             if set(materialized.markdown) != MARKDOWN_KINDS:
                 missing = MARKDOWN_KINDS - set(materialized.markdown)
@@ -1050,7 +1208,10 @@ class StandardService:
                     bucket=standard.source_pdf_bucket or settings.object_store_standard_bucket,
                 )
                 artifacts[kind] = stored.object_key
-            standard.status = "materialized"
+                setattr(standard, f"{kind}_md_object_key", stored.object_key)
+            standard.materialize_status = "materialized"
+            standard.materialize_error = ""
+            standard.materialized_at = datetime.now(timezone.utc)
             standard.index_status = "not_indexed"
             standard.indexed_at = None
             standard.index_error = ""
@@ -1066,19 +1227,21 @@ class StandardService:
                 status="completed",
                 job_status="completed",
             )
-            return {"standard_id": standard_id, "status": standard.status, "artifacts": artifacts}
+            return {"standard_id": standard_id, "status": standard.materialize_status, "artifacts": artifacts}
         except Exception as exc:
-            standard.status = "failed"
+            failure_status = MATERIALIZE_LENGTH_ERROR_STATUS if isinstance(exc, MaterializeLengthError) else "failed"
+            standard.materialize_status = failure_status
+            standard.materialize_error = str(exc)
             session.add(standard)
             session.commit()
             self._set_materialize_progress(
                 session,
                 standard_id,
                 job_id,
-                stage="failed",
+                stage=failure_status,
                 progress_percent=100,
                 message="解析生成失败。",
-                status="failed",
+                status=failure_status,
                 job_status="failed",
                 error=str(exc),
             )
@@ -1090,7 +1253,7 @@ class StandardService:
         standard = session.get(Standard, standard_id)
         if standard is None:
             raise ValueError(f"Standard not found: {standard_id}")
-        object_key = standard_markdown_object_key(standard_id, kind)
+        object_key = getattr(standard, f"{kind}_md_object_key", "") or standard_markdown_object_key(standard_id, kind)
         bucket = standard.source_pdf_bucket or settings.object_store_standard_bucket
         markdown = self.storage.get_bytes(bucket=bucket, object_key=object_key).decode("utf-8", errors="replace")
         return {
@@ -1121,7 +1284,7 @@ class StandardService:
             session.execute(
                 text(
                     """
-                    DELETE FROM standard_search_indexes
+                    DELETE FROM standard_indexes
                     WHERE standard_id = :standard_id AND index_kind = :index_kind
                     """
                 ),
@@ -1130,7 +1293,7 @@ class StandardService:
             session.execute(
                 text(
                     """
-                    INSERT INTO standard_search_indexes (
+                    INSERT INTO standard_indexes (
                         id,
                         standard_id,
                         index_kind,
@@ -1194,9 +1357,7 @@ class StandardService:
     def rebuild_search_index(self, session: Session) -> dict:
         if not is_postgresql_database():
             raise ValueError("标准向量索引需要 PostgreSQL + pgvector，当前 DATABASE_URL 不是 PostgreSQL。")
-        standards = session.scalars(
-            select(Standard).where(Standard.status == "materialized").order_by(Standard.name.asc())
-        ).all()
+        standards = self.current_effective_standards(session)
         indexed = []
         failed = []
         for standard in standards:
@@ -1233,17 +1394,26 @@ class StandardService:
             text(
                 """
                 SELECT
+                    i.id AS index_id,
                     s.id AS standard_id,
                     s.name AS standard_name,
                     s.code AS standard_number,
+                    s.publish_date AS publish_date,
+                    s.effective_date AS effective_date,
+                    s.source_status AS source_status,
+                    s.materialized_at AS materialized_at,
+                    s.indexed_at AS indexed_at,
+                    s.last_synced_at AS last_synced_at,
                     i.index_kind AS index_kind,
                     i.content AS content,
                     i.embedding_model AS embedding_model,
                     i.embedding_dimensions AS embedding_dimensions,
                     1 - (i.embedding <=> CAST(:query_embedding AS vector)) AS score
-                FROM standard_search_indexes i
+                FROM standard_indexes i
                 JOIN standards s ON s.id = i.standard_id
-                WHERE s.index_status = 'indexed'
+                WHERE s.index_status = :current_index_status
+                  AND s.materialize_status = :current_materialize_status
+                  AND s.source_status = :current_source_status
                   AND i.index_kind = :index_kind
                   AND i.embedding_model = :embedding_model
                   AND i.embedding_dimensions = :embedding_dimensions
@@ -1256,6 +1426,9 @@ class StandardService:
                 "index_kind": STANDARD_SEARCH_INDEX_KIND,
                 "embedding_model": settings.standard_embedding_model,
                 "embedding_dimensions": settings.standard_embedding_dimensions,
+                "current_index_status": CURRENT_EFFECTIVE_STANDARD_INDEX_STATUS,
+                "current_materialize_status": CURRENT_EFFECTIVE_STANDARD_MATERIALIZE_STATUS,
+                "current_source_status": CURRENT_EFFECTIVE_STANDARD_SOURCE_STATUS,
                 "limit": final_limit,
             },
         ).mappings().all()
@@ -1268,8 +1441,15 @@ class StandardService:
             matches.append(
                 {
                     "standard_id": row["standard_id"],
+                    "index_id": str(row["index_id"] or ""),
                     "standard_name": row["standard_name"],
                     "standard_number": row["standard_number"] or "",
+                    "publish_date": row["publish_date"] or "",
+                    "effective_date": row["effective_date"] or "",
+                    "source_status": row["source_status"] or "",
+                    "materialized_at": row["materialized_at"].isoformat() if row["materialized_at"] else None,
+                    "indexed_at": row["indexed_at"].isoformat() if row["indexed_at"] else None,
+                    "last_synced_at": row["last_synced_at"].isoformat() if row["last_synced_at"] else None,
                     "decision": decision,
                     "match_level": "strong" if decision == "应返回" else "weak",
                     "score": max(0.0, min(1.0, score)),
@@ -1307,14 +1487,79 @@ class StandardService:
     ) -> int:
         saved_count = 0
         for item in matches:
-            match = StandardMatch(
+            match = StandardSearchResult(
                 id=uuid.uuid4().hex,
-                search_id=search_id,
+                query_id=search_id,
                 standard_id=item["standard_id"],
                 score=item["score"],
                 reason=item.get("reason") or "pgvector 根据 standard_overview.md 检索文本相似度召回。",
             )
             session.add(match)
+            saved_count += 1
+        session.commit()
+        return saved_count
+
+    def match_video(self, session: Session, *, video_id: str, analysis_text: str, limit: int = 5) -> dict:
+        result = self.search(session, analysis_text, limit=limit)
+        self.save_standard_matches(
+            session,
+            matches=result.get("matches") or [],
+            search_id=uuid.uuid4().hex,
+            query_text=analysis_text,
+            caller_type="video_match",
+            video_id=video_id,
+            limit=limit,
+            mode=result.get("mode") or "pgvector_overview",
+        )
+        return result
+
+    def save_standard_matches(
+        self,
+        session: Session,
+        *,
+        matches: list[dict],
+        search_id: str,
+        query_text: str = "",
+        caller_type: str = "web",
+        video_id: str = "",
+        limit: int = 5,
+        mode: str = "pgvector_overview",
+        duration_ms: int = 0,
+        status: str = "success",
+        error_message: str = "",
+    ) -> int:
+        session.add(
+            StandardSearchQuery(
+                id=search_id,
+                query_text=query_text,
+                query_hash=content_hash(query_text.strip()) if query_text.strip() else "",
+                caller_type=caller_type,
+                video_id=video_id or "",
+                limit=limit,
+                mode=mode,
+                embedding_model=settings.standard_embedding_model,
+                embedding_dimensions=settings.standard_embedding_dimensions,
+                result_count=len(matches),
+                duration_ms=duration_ms,
+                status=status,
+                error_message=error_message,
+            )
+        )
+        saved_count = 0
+        for rank, item in enumerate(matches, start=1):
+            session.add(
+                StandardSearchResult(
+                    id=uuid.uuid4().hex,
+                    query_id=search_id,
+                    standard_id=item["standard_id"],
+                    index_id=item.get("index_id") or "",
+                    rank=rank,
+                    score=item["score"],
+                    match_level=item.get("match_level") or item.get("decision") or "",
+                    reason=item.get("reason") or "pgvector overview search",
+                    evidence=json.dumps(item.get("evidence") or [], ensure_ascii=False),
+                )
+            )
             saved_count += 1
         session.commit()
         return saved_count

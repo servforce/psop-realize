@@ -23,6 +23,9 @@ data/*.db
 data/*.sqlite
 data/*.sqlite3
 work/
+weights/
+*.pt
+mobileclip2_b.ts
 
 # Local planning and handoff notes
 meeting-implementation-summary.md

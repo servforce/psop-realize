@@ -33,10 +33,10 @@ DEFAULT_MODEL_OPENAI_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/
 DEFAULT_MODEL_DASHSCOPE_BASE_URL = "https://dashscope.aliyuncs.com"
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class Settings:
     app_env: str = "dev"
-    database_url: str = "sqlite:///./data/workbench.db"
+    database_url: str = "postgresql+psycopg://postgres:postgres@127.0.0.1:5432/servforce_material_workbench"
 
     storage_backend: str = "minio"
     object_store_endpoint: str = "http://10.0.0.20:9000"
@@ -63,8 +63,12 @@ class Settings:
     qwen_text_temperature: float = 0.1
     qwen_text_top_p: float = 0.8
     qwen_text_max_tokens: int = 24000
+    qwen_standard_body_max_tokens: int = 96000
+    qwen_standard_structure_max_tokens: int = 32000
+    qwen_standard_logic_max_tokens: int = 32000
+    qwen_standard_overview_max_tokens: int = 16000
     qwen_text_timeout_seconds: float = 900.0
-    qwen_text_max_input_chars: int = 180000
+    qwen_text_max_input_chars: int = 600000
     qwen_text_file_upload_purpose: str = "file-extract"
     transcript_structure_model: str = "qwen3.7-plus"
     qwen_vl_api_key: str = ""
@@ -96,10 +100,13 @@ class Settings:
     video_dedup_time_window_seconds: float = 10.0
     video_dedup_hsv_similarity_threshold: float = 0.92
     video_dedup_phash_distance_threshold: int = 6
-    video_semantic_embedding_api_key: str = ""
-    video_semantic_embedding_base_url: str = DEFAULT_MODEL_DASHSCOPE_BASE_URL
-    video_semantic_embedding_model: str = "qwen3-vl-embedding"
-    video_semantic_embedding_timeout_seconds: float = 300.0
+    video_graph_index_backend: str = "yolo_world"
+    video_graph_index_device: str = "cpu"
+    video_graph_index_yolo_world_model: str = "yolov8s-world.pt"
+    video_graph_index_yoloe_model: str = "yoloe-26n-seg.pt"
+    video_graph_index_yolo_world_confidence: float = 0.18
+    video_graph_index_yolo_world_iou: float = 0.35
+    video_graph_index_yolo_world_max_det: int = 12
     video_semantic_top_frames_per_section: int = 0
     video_max_visual_operations_per_section: int = 3
     standard_embedding_api_key: str = ""
@@ -108,6 +115,7 @@ class Settings:
     standard_embedding_dimensions: int = 1024
     standard_embedding_timeout_seconds: float = 120.0
     standard_vector_search_min_score: float = 0.0
+    standard_search_result_limit: int = 5
     local_asr_api_base_url: str = ""
     local_asr_language: str = "zh"
     local_asr_timeout_seconds: float = 3600.0
@@ -127,6 +135,23 @@ class Settings:
     openstd_max_pages: int = 0
     openstd_max_items: int = 0
     openstd_download_timeout_seconds: float = 180.0
+    standard_collector_request_interval_seconds: float = 3.0
+    standard_collector_max_retries: int = 2
+    standard_collector_retry_backoff_seconds: float = 3.0
+    standard_collector_discover_timeout_seconds: float = 0.0
+    standard_collector_log_file: str = "./tools/standard-collector/logs/collect_national_pdfs.log"
+    standard_update_scheduler_enabled: bool = False
+    standard_update_interval_seconds: float = 1800.0
+    standard_update_request_interval_seconds: float = 3.0
+    standard_update_max_retries: int = 2
+    standard_update_retry_backoff_seconds: float = 3.0
+    standard_update_max_pages_safety: int = 0
+    standard_update_known_page_stop_count: int = 2
+    standard_update_check_upcoming: bool = True
+    standard_update_upcoming_limit: int = 0
+    standard_update_active_check_limit: int = 0
+    standard_update_new_materialize_limit: int = 0
+    standard_update_log_file: str = "./tools/standard-collector/logs/sync_national_updates.log"
     worker_poll_interval_seconds: float = 1.0
 
     @classmethod
@@ -152,7 +177,10 @@ class Settings:
         qwen_text_api_key = env("QWEN_TEXT_API_KEY", "") or model_api_key
         return cls(
             app_env=env("APP_ENV", "dev"),
-            database_url=env("DATABASE_URL", "sqlite:///./data/workbench.db"),
+            database_url=env(
+                "DATABASE_URL",
+                "postgresql+psycopg://postgres:postgres@127.0.0.1:5432/servforce_material_workbench",
+            ),
             storage_backend=env("STORAGE_BACKEND", "minio").lower(),
             object_store_endpoint=env("OBJECT_STORE_ENDPOINT", "http://10.0.0.20:9000"),
             object_store_access_key=env("OBJECT_STORE_ACCESS_KEY", "minioadmin"),
@@ -176,8 +204,12 @@ class Settings:
             qwen_text_temperature=float(env("QWEN_TEXT_TEMPERATURE", "0.1")),
             qwen_text_top_p=float(env("QWEN_TEXT_TOP_P", "0.8")),
             qwen_text_max_tokens=int(env("QWEN_TEXT_MAX_TOKENS", "24000")),
-            qwen_text_timeout_seconds=float(env("QWEN_TEXT_TIMEOUT_SECONDS", "900")),
-            qwen_text_max_input_chars=int(env("QWEN_TEXT_MAX_INPUT_CHARS", "180000")),
+            qwen_standard_body_max_tokens=int(env("QWEN_STANDARD_BODY_MAX_TOKENS", "96000")),
+            qwen_standard_structure_max_tokens=int(env("QWEN_STANDARD_STRUCTURE_MAX_TOKENS", "32000")),
+            qwen_standard_logic_max_tokens=int(env("QWEN_STANDARD_LOGIC_MAX_TOKENS", "32000")),
+            qwen_standard_overview_max_tokens=int(env("QWEN_STANDARD_OVERVIEW_MAX_TOKENS", "16000")),
+            qwen_text_timeout_seconds=float(env("QWEN_TEXT_TIMEOUT_SECONDS", "1800")),
+            qwen_text_max_input_chars=int(env("QWEN_TEXT_MAX_INPUT_CHARS", "600000")),
             qwen_text_file_upload_purpose=env("QWEN_TEXT_FILE_UPLOAD_PURPOSE", "file-extract"),
             transcript_structure_model=env("TRANSCRIPT_STRUCTURE_MODEL", "qwen3.7-plus"),
             qwen_vl_api_key=env("QWEN_VL_API_KEY", "") or model_api_key,
@@ -209,10 +241,13 @@ class Settings:
             video_dedup_time_window_seconds=float(env("VIDEO_DEDUP_TIME_WINDOW_SECONDS", "10")),
             video_dedup_hsv_similarity_threshold=float(env("VIDEO_DEDUP_HSV_SIMILARITY_THRESHOLD", "0.92")),
             video_dedup_phash_distance_threshold=int(env("VIDEO_DEDUP_PHASH_DISTANCE_THRESHOLD", "6")),
-            video_semantic_embedding_api_key=env("VIDEO_SEMANTIC_EMBEDDING_API_KEY", "") or env("QWEN_VL_EMBEDDING_API_KEY", "") or model_api_key,
-            video_semantic_embedding_base_url=env("VIDEO_SEMANTIC_EMBEDDING_BASE_URL", model_dashscope_base_url),
-            video_semantic_embedding_model=env("VIDEO_SEMANTIC_EMBEDDING_MODEL", "qwen3-vl-embedding"),
-            video_semantic_embedding_timeout_seconds=float(env("VIDEO_SEMANTIC_EMBEDDING_TIMEOUT_SECONDS", "300")),
+            video_graph_index_backend=env("VIDEO_GRAPH_INDEX_BACKEND", "yolo_world").lower(),
+            video_graph_index_device=env("VIDEO_GRAPH_INDEX_DEVICE", "cpu"),
+            video_graph_index_yolo_world_model=env("VIDEO_GRAPH_INDEX_YOLO_WORLD_MODEL", "yolov8s-world.pt"),
+            video_graph_index_yoloe_model=env("VIDEO_GRAPH_INDEX_YOLOE_MODEL", "yoloe-26n-seg.pt"),
+            video_graph_index_yolo_world_confidence=float(env("VIDEO_GRAPH_INDEX_YOLO_WORLD_CONFIDENCE", "0.18")),
+            video_graph_index_yolo_world_iou=float(env("VIDEO_GRAPH_INDEX_YOLO_WORLD_IOU", "0.35")),
+            video_graph_index_yolo_world_max_det=int(env("VIDEO_GRAPH_INDEX_YOLO_WORLD_MAX_DET", "12")),
             video_semantic_top_frames_per_section=int(env("VIDEO_SEMANTIC_TOP_FRAMES_PER_SECTION", "0")),
             video_max_visual_operations_per_section=int(env("VIDEO_MAX_VISUAL_OPERATIONS_PER_SECTION", "3")),
             standard_embedding_api_key=env("STANDARD_EMBEDDING_API_KEY", "") or model_api_key,
@@ -221,6 +256,7 @@ class Settings:
             standard_embedding_dimensions=int(env("STANDARD_EMBEDDING_DIMENSIONS", "1024")),
             standard_embedding_timeout_seconds=float(env("STANDARD_EMBEDDING_TIMEOUT_SECONDS", "120")),
             standard_vector_search_min_score=float(env("STANDARD_VECTOR_SEARCH_MIN_SCORE", "0")),
+            standard_search_result_limit=int(env("STANDARD_SEARCH_RESULT_LIMIT", "5")),
             local_asr_api_base_url=env("LOCAL_ASR_API_BASE_URL", ""),
             local_asr_language=env("LOCAL_ASR_LANGUAGE", "zh"),
             local_asr_timeout_seconds=float(env("LOCAL_ASR_TIMEOUT_SECONDS", "3600")),
@@ -243,6 +279,35 @@ class Settings:
             openstd_max_pages=int(env("OPENSTD_MAX_PAGES", "0")),
             openstd_max_items=int(env("OPENSTD_MAX_ITEMS", "0")),
             openstd_download_timeout_seconds=float(env("OPENSTD_DOWNLOAD_TIMEOUT_SECONDS", "180")),
+            standard_collector_request_interval_seconds=float(
+                env("STANDARD_COLLECTOR_REQUEST_INTERVAL_SECONDS", "3")
+            ),
+            standard_collector_max_retries=int(env("STANDARD_COLLECTOR_MAX_RETRIES", "2")),
+            standard_collector_retry_backoff_seconds=float(
+                env("STANDARD_COLLECTOR_RETRY_BACKOFF_SECONDS", "3")
+            ),
+            standard_collector_discover_timeout_seconds=float(
+                env("STANDARD_COLLECTOR_DISCOVER_TIMEOUT_SECONDS", "0")
+            ),
+            standard_collector_log_file=env(
+                "STANDARD_COLLECTOR_LOG_FILE",
+                "./tools/standard-collector/logs/collect_national_pdfs.log",
+            ),
+            standard_update_scheduler_enabled=env_bool("STANDARD_UPDATE_SCHEDULER_ENABLED", False),
+            standard_update_interval_seconds=float(env("STANDARD_UPDATE_INTERVAL_SECONDS", "1800")),
+            standard_update_request_interval_seconds=float(env("STANDARD_UPDATE_REQUEST_INTERVAL_SECONDS", "3")),
+            standard_update_max_retries=int(env("STANDARD_UPDATE_MAX_RETRIES", "2")),
+            standard_update_retry_backoff_seconds=float(env("STANDARD_UPDATE_RETRY_BACKOFF_SECONDS", "3")),
+            standard_update_max_pages_safety=int(env("STANDARD_UPDATE_MAX_PAGES_SAFETY", "0")),
+            standard_update_known_page_stop_count=int(env("STANDARD_UPDATE_KNOWN_PAGE_STOP_COUNT", "2")),
+            standard_update_check_upcoming=env_bool("STANDARD_UPDATE_CHECK_UPCOMING", True),
+            standard_update_upcoming_limit=int(env("STANDARD_UPDATE_UPCOMING_LIMIT", "0")),
+            standard_update_active_check_limit=int(env("STANDARD_UPDATE_ACTIVE_CHECK_LIMIT", "0")),
+            standard_update_new_materialize_limit=int(env("STANDARD_UPDATE_NEW_MATERIALIZE_LIMIT", "0")),
+            standard_update_log_file=env(
+                "STANDARD_UPDATE_LOG_FILE",
+                "./tools/standard-collector/logs/sync_national_updates.log",
+            ),
             worker_poll_interval_seconds=float(env("WORKER_POLL_INTERVAL_SECONDS", "1")),
         )
 

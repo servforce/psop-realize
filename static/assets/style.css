@@ -66,6 +66,10 @@ button.small {
   background: #2f80ed;
 }
 
+.sidebar button[data-view="standards"] {
+  display: none;
+}
+
 main {
   padding: 24px;
   min-width: 0;
@@ -191,6 +195,35 @@ textarea {
 
 .standard-search-actions button {
   min-width: 140px;
+}
+
+.standard-query-box {
+  grid-template-columns: minmax(0, 1fr) auto;
+  padding: 7px;
+}
+
+.standard-query-box .video-search {
+  height: 46px;
+}
+
+.standard-query-submit {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  min-width: 92px;
+  min-height: 46px;
+  padding: 0 16px;
+  font-weight: 700;
+}
+
+.standard-query-submit svg {
+  flex: 0 0 auto;
+}
+
+.standard-search-results > .standard-query-box {
+  width: min(100%, 840px);
+  justify-self: center;
 }
 
 .standard-search-controls .standard-progress,
@@ -710,6 +743,48 @@ textarea {
 
 .standard-list {
   min-height: 320px;
+}
+
+.active-standard-list {
+  min-height: 260px;
+}
+
+.active-standard-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 14px;
+  align-items: start;
+  border-bottom: 1px solid #eef1f4;
+  padding: 11px 0;
+}
+
+.active-standard-row:first-child {
+  padding-top: 0;
+}
+
+.active-standard-row:last-child {
+  border-bottom: 0;
+  padding-bottom: 0;
+}
+
+.active-standard-row strong,
+.active-standard-row .muted {
+  overflow-wrap: anywhere;
+}
+
+.active-standard-meta {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+  color: #667085;
+  font-size: 12px;
+}
+
+.active-standard-meta span {
+  border-radius: 6px;
+  background: #f2f4f7;
+  padding: 4px 7px;
 }
 
 .standard-list .item {
@@ -1433,6 +1508,33 @@ textarea {
   margin-bottom: 16px;
 }
 
+.standard-search-result-summary {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: flex-start;
+  margin-bottom: 12px;
+}
+
+.standard-search-result-summary h3 {
+  margin: 0 0 4px;
+}
+
+.standard-search-result-summary p {
+  margin: 0;
+}
+
+.standard-search-result-count {
+  flex: 0 0 auto;
+  border-radius: 999px;
+  background: #eef4ff;
+  color: #175cd3;
+  font-size: 13px;
+  font-weight: 700;
+  padding: 8px 12px;
+  white-space: nowrap;
+}
+
 .search-standard-card {
   border: 1px solid #e5e7eb;
   border-radius: 8px;
@@ -1470,6 +1572,18 @@ textarea {
 .search-markdown-preview {
   margin-top: 8px;
   max-height: 360px;
+}
+
+.active-standard-section {
+  display: grid;
+  gap: 12px;
+  width: min(100%, 840px);
+  justify-self: center;
+}
+
+.active-standard-subtext {
+  display: grid;
+  gap: 4px;
 }
 
 .tab {
@@ -1996,6 +2110,12 @@ td, th {
   }
   .history-row {
     grid-template-columns: 1fr;
+  }
+  .active-standard-row {
+    grid-template-columns: 1fr;
+  }
+  .active-standard-meta {
+    justify-content: flex-start;
   }
   .standard-markdown-rendered {
     padding: 14px;

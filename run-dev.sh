@@ -13,4 +13,4 @@ if [ "$major" -lt 3 ] || { [ "$major" -eq 3 ] && [ "$minor" -lt 11 ]; }; then
   exit 1
 fi
 export PYTHONPATH="$PWD"
-python -m uvicorn app.main:app --host 0.0.0.0 --port 8090 --reload
+python -m uvicorn app.main:app --host 0.0.0.0 --port 8090

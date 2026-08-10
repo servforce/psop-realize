@@ -23,14 +23,14 @@ REJECTED = "rejected"
 PENDING = "pending"
 
 
-@dataclass(slots=True)
+@dataclass
 class QualityResult:
     passed: bool
     reason: str
     details: dict[str, Any]
 
 
-@dataclass(slots=True)
+@dataclass
 class FrameCandidate:
     frame: VideoFrame
     image_bytes: bytes

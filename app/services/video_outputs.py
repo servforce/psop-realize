@@ -11,6 +11,10 @@ def transcript_tree_object_key(video_id: str) -> str:
     return f"videos/{video_id}/transcript/transcript_tree.json"
 
 
+def transcript_raw_object_key(video_id: str) -> str:
+    return f"videos/{video_id}/transcript/transcript_raw.json"
+
+
 def transcript_rendered_object_key(video_id: str) -> str:
     return f"videos/{video_id}/transcript/transcript_rendered.txt"
 

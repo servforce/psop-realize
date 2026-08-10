@@ -49,7 +49,7 @@ async def upload_video(file: UploadFile = File(...), title: str = Form("")):
     filename = safe_filename(file.filename or "video.mp4")
     suffix = Path(filename).suffix.lower()
     if suffix not in SUPPORTED_SUFFIXES:
-        raise HTTPException(status_code=400, detail=f"涓嶆敮鎸佺殑瑙嗛鏍煎紡: {suffix or 'unknown'}")
+        raise HTTPException(status_code=400, detail=f"不支持的视频格式: {suffix or 'unknown'}")
 
     video_id = uuid.uuid4().hex
     media_type = file.content_type or media_type_for_suffix(suffix)
@@ -68,10 +68,10 @@ async def upload_video(file: UploadFile = File(...), title: str = Form("")):
                     break
                 size += len(chunk)
                 if size > settings.video_max_upload_bytes:
-                    raise HTTPException(status_code=413, detail="瑙嗛鏂囦欢瓒呰繃涓婁紶澶у皬闄愬埗")
+                    raise HTTPException(status_code=413, detail="视频文件超过上传大小限制")
                 output.write(chunk)
         if size <= 0:
-            raise HTTPException(status_code=400, detail="涓婁紶鏂囦欢涓虹┖")
+            raise HTTPException(status_code=400, detail="上传文件为空")
 
         stored = storage_service.upload_file(object_key=object_key, path=temp_path, media_type=media_type)
         with SessionLocal() as session:
@@ -133,7 +133,7 @@ def parse_video(video_id: str, background_tasks: BackgroundTasks, mode: str = Qu
                 raise HTTPException(status_code=404, detail="视频任务不存在")
             if mode == "wireframes":
                 if job.frame_count <= 0:
-                    raise HTTPException(status_code=400, detail="瑙嗛杩樻病鏈夊叧閿抚锛岃鍏堣В鏋愬叧閿抚")
+                    raise HTTPException(status_code=400, detail="视频还没有关键帧，请先解析关键帧")
                 wireframe_job = create_wireframe_job(video_id)
                 refreshed_wireframe_job = get_wireframe_job(wireframe_job.id) or wireframe_job
                 background_tasks.add_task(run_video_parse_job, video_id, mode, wireframe_job.id)
@@ -290,9 +290,9 @@ def get_frame(video_id: str, filename: str):
     try:
         content = storage_service.get_bytes(bucket=settings.object_store_bucket, object_key=object_key)
     except FileNotFoundError as exc:
-        raise HTTPException(status_code=404, detail="鍏抽敭甯т笉瀛樺湪") from exc
+        raise HTTPException(status_code=404, detail="关键帧不存在") from exc
     except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"鍏抽敭甯у瓨鍌ㄨ鍙栧け璐? {exc}") from exc
+        raise HTTPException(status_code=502, detail=f"关键帧存储读取失败: {exc}") from exc
     media_type = "image/png" if safe_name.lower().endswith(".png") else "image/jpeg"
     return Response(content=content, media_type=media_type)
 
@@ -309,7 +309,7 @@ def get_latest_wireframe_job(video_id: str):
 def get_video_wireframe_job(video_id: str, job_id: str):
     job = get_wireframe_job(job_id)
     if job is None or job.video_id != video_id:
-        raise HTTPException(status_code=404, detail="绾挎鍥句换鍔′笉瀛樺湪")
+        raise HTTPException(status_code=404, detail="线框图任务不存在")
     return {"video_id": video_id, "job": wireframe_job_to_dict(job)}
 
 

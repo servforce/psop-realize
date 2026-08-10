@@ -14,6 +14,9 @@ from app.services.transcript_tree import (
     attach_media_to_transcript_tree,
     build_markdown_from_transcript_tree,
     build_structured_transcript,
+    build_transcript_raw_cache_info,
+    load_cached_transcript_raw,
+    load_cached_transcript_tree,
     render_transcript_tree_text,
 )
 from app.services.video_outputs import (
@@ -23,6 +26,7 @@ from app.services.video_outputs import (
     generated_wireframe_refs,
     markdown_object_key,
     semantic_frame_matches_object_key,
+    transcript_raw_object_key,
     transcript_rendered_object_key,
     transcript_tree_object_key,
 )
@@ -145,7 +149,7 @@ def parse_keyframes(video_id: str, *, finalize: bool = True) -> None:
                     status="processing",
                     stage="semantic_matching",
                     progress=58,
-                    error_message="正在进行图像质量过滤、HSV+pHash 去重和 qwen3-vl-embedding 语义匹配",
+                    error_message="正在进行图像质量过滤、HSV+pHash 去重和图索引评分",
                     frame_count=len(frames),
                     stage_processed=0,
                     stage_total=0,
@@ -456,6 +460,193 @@ def parse_markdown(video_id: str, *, finalize: bool = True) -> None:
                     error_message="",
                     markdown_object_key=markdown_key,
                 )
+        except Exception as exc:
+            repo.update_job(
+                video_id,
+                status="failed",
+                stage="failed",
+                progress=100,
+                error_message=f"{exc}\n{traceback.format_exc(limit=4)}",
+                completed=True,
+            )
+            raise
+
+
+def parse_transcript(video_id: str, *, finalize: bool = True) -> None:
+    with SessionLocal() as session:
+        repo = VideoJobRepository(session)
+        job = repo.get_job(video_id)
+        if job is None:
+            return
+        try:
+            Path(settings.video_workdir).mkdir(parents=True, exist_ok=True)
+            tree_key = transcript_tree_object_key(video_id)
+            rendered_key = transcript_rendered_object_key(video_id)
+            raw_key = transcript_raw_object_key(video_id)
+            expected_raw_cache = build_transcript_raw_cache_info(job=job)
+
+            cached_tree = load_cached_transcript_tree(job=job)
+            if cached_tree is not None:
+                rendered_text = render_transcript_tree_text(cached_tree)
+                storage_service.upload_bytes(
+                    object_key=rendered_key,
+                    content=rendered_text.encode("utf-8"),
+                    media_type="text/plain; charset=utf-8",
+                    bucket=job.source_bucket,
+                )
+                repo.update_job(
+                    video_id,
+                    status="completed" if finalize else "processing",
+                    stage="completed" if finalize else "structuring_transcript",
+                    progress=100 if finalize else 82,
+                    error_message="",
+                    transcript_object_key=rendered_key,
+                    completed=finalize,
+                )
+                return
+
+            cached_raw = load_cached_transcript_raw(job=job)
+            if cached_raw is not None:
+                duration_ms = int(cached_raw.get("duration_ms") or job.duration_ms or 0)
+                repo.update_job(
+                    video_id,
+                    status="processing",
+                    stage="structuring_transcript",
+                    progress=76,
+                    error_message="复用原始 ASR 结果，正在生成结构化转写",
+                )
+                structured = build_structured_transcript(
+                    job=job,
+                    raw_response=cached_raw.get("raw_response") or {},
+                    frames=[],
+                    wireframes=[],
+                    duration_ms=duration_ms,
+                )
+                structured.tree.setdefault("source", {})
+                structured.tree["source"]["tree_object_key"] = tree_key
+                structured.tree["source"]["rendered_object_key"] = rendered_key
+                structured.tree["source"]["raw_object_key"] = raw_key
+                rendered_text = render_transcript_tree_text(structured.tree)
+                storage_service.upload_bytes(
+                    object_key=tree_key,
+                    content=json.dumps(structured.tree, ensure_ascii=False, indent=2).encode("utf-8"),
+                    media_type="application/json; charset=utf-8",
+                    bucket=job.source_bucket,
+                )
+                storage_service.upload_bytes(
+                    object_key=rendered_key,
+                    content=rendered_text.encode("utf-8"),
+                    media_type="text/plain; charset=utf-8",
+                    bucket=job.source_bucket,
+                )
+                if finalize:
+                    repo.update_job(
+                        video_id,
+                        status="completed",
+                        stage="completed",
+                        progress=100,
+                        error_message="",
+                        transcript_object_key=rendered_key,
+                        completed=True,
+                    )
+                else:
+                    repo.update_job(
+                        video_id,
+                        status="processing",
+                        stage="structuring_transcript",
+                        progress=82,
+                        error_message="",
+                        transcript_object_key=rendered_key,
+                    )
+                return
+
+            repo.update_job(
+                video_id,
+                status="processing",
+                stage="transcribing_asr",
+                progress=62,
+                error_message="正在调用本地 ASR 模型进行原始转写",
+            )
+            with tempfile.TemporaryDirectory(prefix=f"{video_id}_parse_asr_", dir=settings.video_workdir) as tmp:
+                source_path = Path(tmp) / f"source{Path(job.filename).suffix or '.mp4'}"
+                analysis_path, job = ensure_analysis_video_file(
+                    repo=repo,
+                    job=job,
+                    source_path=source_path,
+                    output_path=Path(tmp) / "analysis_720p_h265.mp4",
+                )
+                duration_ms = job.duration_ms or probe_video_duration_ms(analysis_path)
+                if duration_ms and duration_ms != job.duration_ms:
+                    job = repo.update_job(video_id, duration_ms=duration_ms)
+                result = transcribe_or_fallback(
+                    analysis_path,
+                    job.filename,
+                    job.analysis_video_object_key or job.source_object_key,
+                    [],
+                )
+                raw_payload = {
+                    "cache": expected_raw_cache,
+                    "duration_ms": int(duration_ms or 0),
+                    "language": result.get("language"),
+                    "provider": result.get("provider"),
+                    "raw_response": result.get("raw_response") or {},
+                }
+                storage_service.upload_bytes(
+                    object_key=raw_key,
+                    content=json.dumps(raw_payload, ensure_ascii=False, indent=2).encode("utf-8"),
+                    media_type="application/json; charset=utf-8",
+                    bucket=job.source_bucket,
+                )
+                repo.update_job(
+                    video_id,
+                    status="processing",
+                    stage="structuring_transcript",
+                    progress=76,
+                    error_message="正在调用 qwen3.7-plus 生成语义结构化转写",
+                )
+                structured = build_structured_transcript(
+                    job=job,
+                    raw_response=raw_payload["raw_response"],
+                    frames=[],
+                    wireframes=[],
+                    duration_ms=duration_ms,
+                )
+                structured.tree.setdefault("source", {})
+                structured.tree["source"]["tree_object_key"] = tree_key
+                structured.tree["source"]["rendered_object_key"] = rendered_key
+                structured.tree["source"]["raw_object_key"] = raw_key
+                rendered_text = render_transcript_tree_text(structured.tree)
+                storage_service.upload_bytes(
+                    object_key=tree_key,
+                    content=json.dumps(structured.tree, ensure_ascii=False, indent=2).encode("utf-8"),
+                    media_type="application/json; charset=utf-8",
+                    bucket=job.source_bucket,
+                )
+                storage_service.upload_bytes(
+                    object_key=rendered_key,
+                    content=rendered_text.encode("utf-8"),
+                    media_type="text/plain; charset=utf-8",
+                    bucket=job.source_bucket,
+                )
+                if finalize:
+                    repo.update_job(
+                        video_id,
+                        status="completed",
+                        stage="completed",
+                        progress=100,
+                        error_message="",
+                        transcript_object_key=rendered_key,
+                        completed=True,
+                    )
+                else:
+                    repo.update_job(
+                        video_id,
+                        status="processing",
+                        stage="structuring_transcript",
+                        progress=82,
+                        error_message="",
+                        transcript_object_key=rendered_key,
+                    )
         except Exception as exc:
             repo.update_job(
                 video_id,

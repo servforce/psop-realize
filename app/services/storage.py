@@ -7,7 +7,7 @@ from pathlib import Path
 from app.core.config import Settings, settings
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class StoredObject:
     bucket: str
     object_key: str

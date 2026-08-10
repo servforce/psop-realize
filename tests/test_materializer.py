@@ -10,7 +10,15 @@ from app.services.standards import (
 
 
 class FakeMarkdownGenerator:
-    def generate(self, *, standard_name: str, source_pdf: str, pdf_path: Path, progress=None) -> MaterializedStandard:
+    def generate(
+        self,
+        *,
+        standard_name: str,
+        source_pdf: str,
+        pdf_path: Path,
+        progress=None,
+        timeout_seconds=None,
+    ) -> MaterializedStandard:
         def front(role: str, extra: str = "") -> str:
             return f"""---
 standard_name: "{standard_name}"
