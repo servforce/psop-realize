@@ -10,14 +10,13 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
-from fastapi import APIRouter, BackgroundTasks, File, HTTPException, Query, UploadFile
+from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import PlainTextResponse, Response
 from sqlalchemy import select
 
 from app.db.session import SessionLocal
 from app.core.config import settings
 from app.models.entities import (
-    CallLog,
     Standard,
     StandardProcessingJob,
     StandardSearchQuery,
@@ -25,8 +24,8 @@ from app.models.entities import (
     StandardSyncItem,
     StandardSyncJob,
 )
+from app.models.standard_library import CallLog
 from app.services.audit import finish_call, logged_call
-from app.services.openstd_crawl import openstd_crawl_service
 from app.services.standard_update import latest_standard_update_job, standard_update_job_to_dict
 from app.services.standards import MARKDOWN_KINDS, standard_markdown_object_key, standard_service
 
@@ -35,11 +34,22 @@ router = APIRouter(prefix="/api/standards", tags=["standards"])
 
 @router.post("/refresh-pdfs")
 def refresh_pdfs():
-    raise HTTPException(status_code=410, detail="本地目录刷新已停用，请使用标准 PDF 上传。")
+    raise HTTPException(
+        status_code=410,
+        detail="旧标准库本地目录刷新已停用。标准库历史采集请使用 collect_national_pdfs.py 等外部采集脚本。",
+    )
 
 
 @router.post("/upload")
-async def upload_standards(files: list[UploadFile] = File(...)):
+async def upload_standards():
+    raise HTTPException(
+        status_code=410,
+        detail=(
+            "旧标准库 PDF 手动上传入口已废弃。"
+            "标准库历史采集请运行 tools/standard-collector/scripts/collect_national_pdfs.py，"
+            "解析/索引请运行 tools/standard-collector/scripts/process_standard_library_jobs.py。"
+        ),
+    )
     workdir = Path(settings.standard_workdir)
     workdir.mkdir(parents=True, exist_ok=True)
     uploaded = []
@@ -103,6 +113,10 @@ def get_latest_standard_update_job():
 
 @router.post("/index/rebuild")
 def rebuild_standard_search_index():
+    raise HTTPException(
+        status_code=410,
+        detail="旧标准库手动重建索引入口已废弃。请使用新标准库 processing job 或 process_standard_library_jobs.py。",
+    )
     with SessionLocal() as session:
         with logged_call(session, interface_type="rest", tool_or_endpoint="POST /api/standards/index/rebuild") as call_id:
             try:
@@ -124,6 +138,10 @@ def rebuild_standard_search_index():
 
 @router.post("/{standard_id}/index/rebuild")
 def rebuild_one_standard_search_index(standard_id: str):
+    raise HTTPException(
+        status_code=410,
+        detail="旧标准库单条重建索引入口已废弃。请使用新标准库 processing job 或 process_standard_library_jobs.py。",
+    )
     with SessionLocal() as session:
         with logged_call(
             session,
@@ -155,45 +173,30 @@ def search_history(limit: int = 0):
 
 
 @router.post("/openstd/crawl")
-def create_openstd_crawl_job(background_tasks: BackgroundTasks):
-    with SessionLocal() as session:
-        with logged_call(session, interface_type="rest", tool_or_endpoint="POST /api/standards/openstd/crawl") as call_id:
-            result = openstd_crawl_service.create_job(session)
-            if result.get("created") or result.get("status") in {"queued", "running"}:
-                background_tasks.add_task(run_openstd_crawl_job, result["id"])
-            finish_call(session, call_id, result)
-            return result
+def create_openstd_crawl_job():
+    raise HTTPException(
+        status_code=410,
+        detail=(
+            "OpenSTD 前端一键爬取入口已废弃。"
+            "国家标准历史采集请在项目外运行 tools/standard-collector/scripts/collect_national_pdfs.py，"
+            "解析/索引请运行 tools/standard-collector/scripts/process_standard_library_jobs.py。"
+        ),
+    )
 
 
 @router.get("/openstd/crawl/latest")
 def get_latest_openstd_crawl_job():
-    with SessionLocal() as session:
-        result = openstd_crawl_service.latest_job(session)
-        if result is None:
-            return {"status": "none"}
-        return result
+    return {"status": "disabled", "message": "OpenSTD 前端一键爬取入口已废弃，请使用外部历史采集脚本。"}
 
 
 @router.get("/openstd/crawl/{job_id}")
 def get_openstd_crawl_job(job_id: str):
-    with SessionLocal() as session:
-        job = session.get(StandardSyncJob, job_id)
-        if job is None:
-            raise HTTPException(status_code=404, detail="openstd crawl job not found")
-        return openstd_crawl_service.job_to_dict(session, job)
+    raise HTTPException(status_code=410, detail="OpenSTD 前端一键爬取入口已废弃，请使用外部历史采集脚本。")
 
 
 @router.get("/openstd/crawl/{job_id}/items")
 def list_openstd_crawl_items(job_id: str, status: str = Query("", alias="status"), limit: int = 100):
-    with SessionLocal() as session:
-        job = session.get(StandardSyncJob, job_id)
-        if job is None:
-            raise HTTPException(status_code=404, detail="openstd crawl job not found")
-        statement = select(StandardSyncItem).where(StandardSyncItem.job_id == job_id)
-        if status:
-            statement = statement.where(StandardSyncItem.status == status)
-        statement = statement.order_by(StandardSyncItem.created_at.desc()).limit(max(1, min(limit, 500)))
-        return [openstd_crawl_service.item_to_dict(item) for item in session.scalars(statement).all()]
+    raise HTTPException(status_code=410, detail="OpenSTD 前端一键爬取入口已废弃，请使用外部历史采集脚本。")
 
 
 @router.get("/{standard_id}")
@@ -206,7 +209,11 @@ def get_standard(standard_id: str):
 
 
 @router.post("/{standard_id}/materialize")
-def materialize_standard(standard_id: str, background_tasks: BackgroundTasks):
+def materialize_standard(standard_id: str):
+    raise HTTPException(
+        status_code=410,
+        detail="旧标准库手动解析入口已废弃。请使用新标准库 materialize processing job。",
+    )
     with SessionLocal() as session:
         with logged_call(
             session,
@@ -431,18 +438,6 @@ def run_standard_materialize_job(standard_id: str, job_id: str) -> None:
             standard_id=standard_id,
         ) as call_id:
             result = standard_service.materialize(session, standard_id, job_id=job_id)
-            finish_call(session, call_id, result)
-
-
-def run_openstd_crawl_job(job_id: str) -> None:
-    with SessionLocal() as session:
-        with logged_call(
-            session,
-            interface_type="background",
-            tool_or_endpoint="openstd_crawl_job",
-            request={"job_id": job_id},
-        ) as call_id:
-            result = openstd_crawl_service.run_job(session, job_id)
             finish_call(session, call_id, result)
 
 

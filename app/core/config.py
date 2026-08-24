@@ -29,6 +29,13 @@ def env_bool(name: str, default: bool = False) -> bool:
     return value not in {"", "0", "false", "no", "off"}
 
 
+def env_list(name: str, default: str = "") -> tuple[str, ...]:
+    import re
+
+    value = env(name, default)
+    return tuple(part.strip() for part in re.split(r"[,;，；\n]+", value) if part.strip())
+
+
 DEFAULT_MODEL_OPENAI_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 DEFAULT_MODEL_DASHSCOPE_BASE_URL = "https://dashscope.aliyuncs.com"
 
@@ -37,6 +44,9 @@ DEFAULT_MODEL_DASHSCOPE_BASE_URL = "https://dashscope.aliyuncs.com"
 class Settings:
     app_env: str = "dev"
     database_url: str = "postgresql+psycopg://postgres:postgres@127.0.0.1:5432/servforce_material_workbench"
+    standard_library_database_url: str = (
+        "postgresql+psycopg://postgres:postgres@127.0.0.1:5432/octopus_standard_library"
+    )
 
     storage_backend: str = "minio"
     object_store_endpoint: str = "http://10.0.0.20:9000"
@@ -44,6 +54,7 @@ class Settings:
     object_store_secret_key: str = "minioadmin"
     object_store_bucket: str = "servforce-materials"
     object_store_standard_bucket: str = "servforce-standards"
+    standard_library_object_store_bucket: str = "octopus-standard-library"
     object_store_region: str = "us-east-1"
     object_store_secure: bool = False
 
@@ -100,15 +111,13 @@ class Settings:
     video_dedup_time_window_seconds: float = 10.0
     video_dedup_hsv_similarity_threshold: float = 0.92
     video_dedup_phash_distance_threshold: int = 6
-    video_graph_index_backend: str = "yolo_world"
-    video_graph_index_device: str = "cpu"
-    video_graph_index_yolo_world_model: str = "yolov8s-world.pt"
-    video_graph_index_yoloe_model: str = "yoloe-26n-seg.pt"
-    video_graph_index_yolo_world_confidence: float = 0.18
+    video_graph_index_device: str = "cuda"
+    video_graph_index_finetuned_yolo_world_model: str = "runs/yolo_world/robot_arm_parts_v1/weights/best.pt"
+    video_graph_index_mobile_sam_model: str = "sam2.1_b.pt"
+    video_graph_index_yolo_world_confidence: float = 0.10
     video_graph_index_yolo_world_iou: float = 0.35
     video_graph_index_yolo_world_max_det: int = 12
     video_semantic_top_frames_per_section: int = 0
-    video_max_visual_operations_per_section: int = 3
     standard_embedding_api_key: str = ""
     standard_embedding_base_url: str = DEFAULT_MODEL_OPENAI_BASE_URL
     standard_embedding_model: str = "text-embedding-v4"
@@ -141,6 +150,19 @@ class Settings:
     standard_collector_discover_timeout_seconds: float = 0.0
     standard_collector_log_file: str = "./tools/standard-collector/logs/collect_national_pdfs.log"
     standard_update_scheduler_enabled: bool = False
+    standard_update_national_enabled: bool = True
+    standard_update_industry_enabled: bool = False
+    standard_update_local_enabled: bool = False
+    standard_update_industry_categories: tuple[str, ...] = ()
+    standard_update_local_categories: tuple[str, ...] = ()
+    standard_update_sacinfo_require_categories: bool = True
+    standard_update_sacinfo_status: str = ""
+    standard_update_sacinfo_page_size: int = 50
+    standard_update_sacinfo_max_pages: int = 1
+    standard_update_sacinfo_max_items: int = 50
+    standard_update_sacinfo_download_pdfs: bool = True
+    standard_update_sacinfo_processing_limit: int = 0
+    standard_update_sacinfo_refresh_atlas: bool = True
     standard_update_interval_seconds: float = 1800.0
     standard_update_request_interval_seconds: float = 3.0
     standard_update_max_retries: int = 2
@@ -152,6 +174,7 @@ class Settings:
     standard_update_active_check_limit: int = 0
     standard_update_new_materialize_limit: int = 0
     standard_update_log_file: str = "./tools/standard-collector/logs/sync_national_updates.log"
+    standard_library_processing_worker_enabled: bool = False
     worker_poll_interval_seconds: float = 1.0
 
     @classmethod
@@ -181,12 +204,20 @@ class Settings:
                 "DATABASE_URL",
                 "postgresql+psycopg://postgres:postgres@127.0.0.1:5432/servforce_material_workbench",
             ),
+            standard_library_database_url=env(
+                "STANDARD_LIBRARY_DATABASE_URL",
+                "postgresql+psycopg://postgres:postgres@127.0.0.1:5432/octopus_standard_library",
+            ),
             storage_backend=env("STORAGE_BACKEND", "minio").lower(),
             object_store_endpoint=env("OBJECT_STORE_ENDPOINT", "http://10.0.0.20:9000"),
             object_store_access_key=env("OBJECT_STORE_ACCESS_KEY", "minioadmin"),
             object_store_secret_key=env("OBJECT_STORE_SECRET_KEY", "minioadmin"),
             object_store_bucket=env("OBJECT_STORE_BUCKET", "servforce-materials"),
             object_store_standard_bucket=env("OBJECT_STORE_STANDARD_BUCKET", "servforce-standards"),
+            standard_library_object_store_bucket=env(
+                "STANDARD_LIBRARY_OBJECT_STORE_BUCKET",
+                "octopus-standard-library",
+            ),
             object_store_region=env("OBJECT_STORE_REGION", "us-east-1"),
             object_store_secure=env_bool("OBJECT_STORE_SECURE", False),
             mcp_client_id=env("MCP_CLIENT_ID", "local-dev"),
@@ -241,15 +272,16 @@ class Settings:
             video_dedup_time_window_seconds=float(env("VIDEO_DEDUP_TIME_WINDOW_SECONDS", "10")),
             video_dedup_hsv_similarity_threshold=float(env("VIDEO_DEDUP_HSV_SIMILARITY_THRESHOLD", "0.92")),
             video_dedup_phash_distance_threshold=int(env("VIDEO_DEDUP_PHASH_DISTANCE_THRESHOLD", "6")),
-            video_graph_index_backend=env("VIDEO_GRAPH_INDEX_BACKEND", "yolo_world").lower(),
-            video_graph_index_device=env("VIDEO_GRAPH_INDEX_DEVICE", "cpu"),
-            video_graph_index_yolo_world_model=env("VIDEO_GRAPH_INDEX_YOLO_WORLD_MODEL", "yolov8s-world.pt"),
-            video_graph_index_yoloe_model=env("VIDEO_GRAPH_INDEX_YOLOE_MODEL", "yoloe-26n-seg.pt"),
-            video_graph_index_yolo_world_confidence=float(env("VIDEO_GRAPH_INDEX_YOLO_WORLD_CONFIDENCE", "0.18")),
+            video_graph_index_device=env("VIDEO_GRAPH_INDEX_DEVICE", "cuda"),
+            video_graph_index_finetuned_yolo_world_model=env(
+                "VIDEO_GRAPH_INDEX_FINETUNED_YOLO_WORLD_MODEL",
+                "runs/yolo_world/robot_arm_parts_v1/weights/best.pt",
+            ),
+            video_graph_index_mobile_sam_model=env("VIDEO_GRAPH_INDEX_MOBILE_SAM_MODEL", "sam2.1_b.pt"),
+            video_graph_index_yolo_world_confidence=float(env("VIDEO_GRAPH_INDEX_YOLO_WORLD_CONFIDENCE", "0.10")),
             video_graph_index_yolo_world_iou=float(env("VIDEO_GRAPH_INDEX_YOLO_WORLD_IOU", "0.35")),
             video_graph_index_yolo_world_max_det=int(env("VIDEO_GRAPH_INDEX_YOLO_WORLD_MAX_DET", "12")),
             video_semantic_top_frames_per_section=int(env("VIDEO_SEMANTIC_TOP_FRAMES_PER_SECTION", "0")),
-            video_max_visual_operations_per_section=int(env("VIDEO_MAX_VISUAL_OPERATIONS_PER_SECTION", "3")),
             standard_embedding_api_key=env("STANDARD_EMBEDDING_API_KEY", "") or model_api_key,
             standard_embedding_base_url=env("STANDARD_EMBEDDING_BASE_URL", model_openai_base_url),
             standard_embedding_model=env("STANDARD_EMBEDDING_MODEL", "text-embedding-v4"),
@@ -294,6 +326,19 @@ class Settings:
                 "./tools/standard-collector/logs/collect_national_pdfs.log",
             ),
             standard_update_scheduler_enabled=env_bool("STANDARD_UPDATE_SCHEDULER_ENABLED", False),
+            standard_update_national_enabled=env_bool("STANDARD_UPDATE_NATIONAL_ENABLED", True),
+            standard_update_industry_enabled=env_bool("STANDARD_UPDATE_INDUSTRY_ENABLED", False),
+            standard_update_local_enabled=env_bool("STANDARD_UPDATE_LOCAL_ENABLED", False),
+            standard_update_industry_categories=env_list("STANDARD_UPDATE_INDUSTRY_CATEGORIES"),
+            standard_update_local_categories=env_list("STANDARD_UPDATE_LOCAL_CATEGORIES"),
+            standard_update_sacinfo_require_categories=env_bool("STANDARD_UPDATE_SACINFO_REQUIRE_CATEGORIES", True),
+            standard_update_sacinfo_status=env("STANDARD_UPDATE_SACINFO_STATUS", ""),
+            standard_update_sacinfo_page_size=int(env("STANDARD_UPDATE_SACINFO_PAGE_SIZE", "50")),
+            standard_update_sacinfo_max_pages=int(env("STANDARD_UPDATE_SACINFO_MAX_PAGES", "1")),
+            standard_update_sacinfo_max_items=int(env("STANDARD_UPDATE_SACINFO_MAX_ITEMS", "50")),
+            standard_update_sacinfo_download_pdfs=env_bool("STANDARD_UPDATE_SACINFO_DOWNLOAD_PDFS", True),
+            standard_update_sacinfo_processing_limit=int(env("STANDARD_UPDATE_SACINFO_PROCESSING_LIMIT", "0")),
+            standard_update_sacinfo_refresh_atlas=env_bool("STANDARD_UPDATE_SACINFO_REFRESH_ATLAS", True),
             standard_update_interval_seconds=float(env("STANDARD_UPDATE_INTERVAL_SECONDS", "1800")),
             standard_update_request_interval_seconds=float(env("STANDARD_UPDATE_REQUEST_INTERVAL_SECONDS", "3")),
             standard_update_max_retries=int(env("STANDARD_UPDATE_MAX_RETRIES", "2")),
@@ -308,6 +353,7 @@ class Settings:
                 "STANDARD_UPDATE_LOG_FILE",
                 "./tools/standard-collector/logs/sync_national_updates.log",
             ),
+            standard_library_processing_worker_enabled=env_bool("STANDARD_LIBRARY_PROCESSING_WORKER_ENABLED", False),
             worker_poll_interval_seconds=float(env("WORKER_POLL_INTERVAL_SECONDS", "1")),
         )
 

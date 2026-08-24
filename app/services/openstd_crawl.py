@@ -16,6 +16,13 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.models.entities import Standard, StandardSyncItem, StandardSyncJob
+from app.services.standard_library_collect import (
+    mirror_standard_library_item,
+    mirror_standard_library_job,
+    standard_exists_in_library,
+    upsert_national_standard_from_raw,
+)
+from app.services.standard_library_materialize import standard_library_materialize_service
 from app.services.standards import safe_filename, standard_id_from_name
 from app.services.storage import StorageService, storage_service
 
@@ -170,6 +177,7 @@ class OpenStdCrawlService:
         )
         session.add(job)
         session.commit()
+        mirror_standard_library_job(job, job_type="historical_collect", trigger_type="admin", status="pending")
         result = self.job_to_dict(session, job)
         result["created"] = True
         return result
@@ -192,6 +200,7 @@ class OpenStdCrawlService:
             job.updated_at = datetime.now(timezone.utc)
             session.add(job)
             session.commit()
+            mirror_standard_library_job(job, job_type="historical_collect", trigger_type="admin", status="running")
         return job
 
     def run_job(self, session: Session, job_id: str) -> dict[str, Any]:
@@ -203,6 +212,7 @@ class OpenStdCrawlService:
         job.error_message = ""
         session.add(job)
         session.commit()
+        mirror_standard_library_job(job, job_type="historical_collect", trigger_type="admin", status="running")
         try:
             if not self._has_items(session, job_id):
                 self._discover_items(session, job)
@@ -213,6 +223,7 @@ class OpenStdCrawlService:
             job.updated_at = datetime.now(timezone.utc)
             session.add(job)
             session.commit()
+            mirror_standard_library_job(job, job_type="historical_collect", trigger_type="admin", status=job.status)
             return self.job_to_dict(session, job)
         except Exception as exc:
             job.status = "failed"
@@ -221,6 +232,13 @@ class OpenStdCrawlService:
             job.updated_at = datetime.now(timezone.utc)
             session.add(job)
             session.commit()
+            mirror_standard_library_job(
+                job,
+                job_type="historical_collect",
+                trigger_type="admin",
+                status="failed",
+                error_message=str(exc),
+            )
             raise
 
     def _has_items(self, session: Session, job_id: str) -> bool:
@@ -254,11 +272,29 @@ class OpenStdCrawlService:
             if code:
                 seen_codes.add(code)
             is_existing_standard = self._is_duplicate_standard(session, code)
-            if is_existing_standard:
+            is_existing_in_library = standard_exists_in_library(code=code, detail_url=detail_url)
+            if is_existing_standard and is_existing_in_library:
                 job.unchanged_count += 1
+                mirror_standard_library_item(
+                    job,
+                    raw,
+                    job_type="historical_collect",
+                    metadata_action="unchanged",
+                    file_decision="no_download",
+                    file_result="skipped",
+                )
                 continue
             if is_duplicate_in_job:
                 job.skipped_count += 1
+                mirror_standard_library_item(
+                    job,
+                    raw,
+                    job_type="historical_collect",
+                    metadata_action="unchanged",
+                    file_decision="skip",
+                    file_result="skipped",
+                    error_message="duplicate_in_job",
+                )
                 continue
             item = StandardSyncItem(
                 id=uuid.uuid4().hex,
@@ -281,6 +317,14 @@ class OpenStdCrawlService:
                 skip_reason="",
             )
             session.add(item)
+            mirror_standard_library_item(
+                job,
+                raw,
+                job_type="historical_collect",
+                legacy_standard_id=item.standard_id,
+                metadata_action="new",
+                file_decision="download",
+            )
         session.commit()
         self._refresh_counts(session, job)
 
@@ -297,12 +341,25 @@ class OpenStdCrawlService:
             ).first()
             if item is None:
                 return
-            if self._is_duplicate_standard(session, item.standard_code):
+            if self._is_duplicate_standard(session, item.standard_code) and standard_exists_in_library(
+                code=item.standard_code,
+                detail_url=item.detail_url,
+            ):
                 item.status = "skipped_duplicate"
                 item.skip_reason = "standard_code_exists"
                 item.updated_at = datetime.now(timezone.utc)
                 session.add(item)
                 session.commit()
+                mirror_standard_library_item(
+                    job,
+                    raw_from_openstd_item(item),
+                    job_type="historical_collect",
+                    legacy_standard_id=item.standard_id or "",
+                    metadata_action="unchanged",
+                    file_decision="no_download",
+                    file_result="skipped",
+                    error_message=item.skip_reason,
+                )
                 self._refresh_counts(session, job)
                 continue
             self._download_one(session, job, item)
@@ -330,6 +387,24 @@ class OpenStdCrawlService:
                     item.skip_reason = str(payload.get("reason") or "not_downloadable")
                     session.add(item)
                     session.commit()
+                    library_standard_id = upsert_national_standard_from_raw(
+                        raw_from_openstd_item(item),
+                        detail=payload.get("detail") or {},
+                        legacy_standard_id=item.standard_id or "",
+                        file_access_type="unavailable",
+                    )
+                    mirror_standard_library_item(
+                        job,
+                        raw_from_openstd_item(item),
+                        job_type="historical_collect",
+                        legacy_standard_id=item.standard_id or "",
+                        standard_id=library_standard_id,
+                        metadata_action="new",
+                        file_decision="unavailable",
+                        file_result="skipped",
+                        retry_count=item.retry_count,
+                        error_message=item.skip_reason,
+                    )
                     self._refresh_counts(session, job)
                     return
                 if payload.get("status") != "downloaded":
@@ -381,6 +456,33 @@ class OpenStdCrawlService:
                 item.updated_at = datetime.now(timezone.utc)
                 session.add(item)
                 session.commit()
+                library_standard_id = upsert_national_standard_from_raw(
+                    raw_from_openstd_item(item),
+                    detail=payload.get("detail") or {},
+                    legacy_standard_id=standard_id,
+                    bucket=stored.bucket,
+                    object_key=stored.object_key,
+                    checksum=stored.checksum,
+                    size_bytes=stored.size_bytes,
+                    fingerprint=stored.checksum,
+                    file_access_type="downloadable",
+                )
+                mirror_standard_library_item(
+                    job,
+                    raw_from_openstd_item(item),
+                    job_type="historical_collect",
+                    legacy_standard_id=standard_id,
+                    standard_id=library_standard_id,
+                    metadata_action="new",
+                    file_decision="download",
+                    file_result="success",
+                    bucket=stored.bucket,
+                    object_key=stored.object_key,
+                    checksum=stored.checksum,
+                    size_bytes=stored.size_bytes,
+                    retry_count=item.retry_count,
+                )
+                standard_library_materialize_service.enqueue_materialize_job(library_standard_id)
                 self._refresh_counts(session, job)
         except Exception as exc:
             item.status = "failed"
@@ -388,6 +490,17 @@ class OpenStdCrawlService:
             item.updated_at = datetime.now(timezone.utc)
             session.add(item)
             session.commit()
+            mirror_standard_library_item(
+                job,
+                raw_from_openstd_item(item),
+                job_type="historical_collect",
+                legacy_standard_id=item.standard_id or "",
+                metadata_action="new",
+                file_decision="download",
+                file_result="failed",
+                retry_count=item.retry_count,
+                error_message=str(exc),
+            )
             self._refresh_counts(session, job)
 
     def _is_duplicate_standard(self, session: Session, standard_code: str) -> bool:
@@ -513,6 +626,23 @@ class OpenStdCrawlService:
             "created_at": item.created_at.isoformat() if item.created_at else None,
             "updated_at": item.updated_at.isoformat() if item.updated_at else None,
         }
+
+
+def raw_from_openstd_item(item: StandardSyncItem) -> dict[str, Any]:
+    return {
+        "standard_code": item.standard_code,
+        "standard_name": item.standard_name,
+        "standard_status": item.standard_status or item.source_status_raw,
+        "source_status_raw": item.source_status_raw,
+        "publish_date": item.publish_date,
+        "effective_date": item.effective_date,
+        "source_scope": item.source_scope,
+        "source_label": item.source_label,
+        "source_url": item.source_url,
+        "detail_url": item.detail_url,
+        "download_url": item.download_url,
+        "online_url": "",
+    }
 
 
 openstd_crawl_service = OpenStdCrawlService()

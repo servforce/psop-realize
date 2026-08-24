@@ -4,7 +4,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, File, HTTPException, UploadFile
 
-from app.db.session import SessionLocal
+from app.db.standard_library import StandardLibrarySessionLocal
 from app.services.audit import finish_call, logged_call
 from app.services.wireframes import wireframe_service
 
@@ -17,11 +17,11 @@ async def generate_image_wireframe(file: UploadFile = File(...)):
     filename = file.filename or "image.png"
     suffix = Path(filename).suffix.lower()
     if suffix not in {".jpg", ".jpeg", ".png", ".webp", ".bmp"}:
-        raise HTTPException(status_code=400, detail=f"不支持的图片格式: {suffix or 'unknown'}")
+        raise HTTPException(status_code=400, detail=f"涓嶆敮鎸佺殑鍥剧墖鏍煎紡: {suffix or 'unknown'}")
     content = await file.read()
     if not content:
-        raise HTTPException(status_code=400, detail="上传图片为空")
-    with SessionLocal() as session:
+        raise HTTPException(status_code=400, detail="涓婁紶鍥剧墖涓虹┖")
+    with StandardLibrarySessionLocal() as session:
         with logged_call(
             session,
             interface_type="rest",

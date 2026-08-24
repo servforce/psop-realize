@@ -29,6 +29,8 @@ def test_build_markdown_from_transcript_tree_renders_structured_sections():
                     "start_time": "00:35",
                     "end_time": "01:10",
                     "text": "首先打开变频器盖板，将交流二百二十伏电源接到输入端。",
+                    "polished_text": "首先打开变频器盖板，将交流 220 伏电源接到输入端。",
+                    "business_frame_text": "变频器盖板打开，输入端子和已接入的交流 220 伏电源线清晰可见。",
                     "frames": [
                         {
                             "id": 11,
@@ -64,6 +66,10 @@ def test_build_markdown_from_transcript_tree_renders_structured_sections():
     assert "**时间范围：** 00:35 - 01:10" in markdown
     assert "### 正文" in markdown
     assert "首先打开变频器盖板" in markdown
+    assert "### 润色后正文" in markdown
+    assert "交流 220 伏电源" in markdown
+    assert "### 待匹配文本" in markdown
+    assert "输入端子和已接入的交流 220 伏电源线清晰可见" in markdown
     assert "### 关键帧" in markdown
     assert "videos/video-1/frames/000042000.jpg" in markdown
     assert "### 线框图" in markdown

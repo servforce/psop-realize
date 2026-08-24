@@ -4,7 +4,7 @@ import asyncio
 import logging
 
 from app.core.config import Settings, settings
-from app.db.session import SessionLocal
+from app.db.standard_library import StandardLibrarySessionLocal
 from app.services.video_repository import VideoJobRepository
 from app.services.videos import VideoJobRunner
 
@@ -33,7 +33,7 @@ class VideoWorker:
         self._stop.set()
 
     def _claim_next_job_id(self) -> str | None:
-        with SessionLocal() as session:
+        with StandardLibrarySessionLocal() as session:
             repo = VideoJobRepository(session)
             job = repo.claim_next_job()
             return job.id if job else None

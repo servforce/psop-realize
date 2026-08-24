@@ -11,7 +11,7 @@ from pathlib import Path
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
-from app.models.entities import VideoFrame
+from app.models.standard_library import VideoFrame
 from app.services.audit import finish_call, logged_call_with_session
 from app.services.storage import StorageService, storage_service
 from app.services.video_outputs import wireframe_object_key_for_frame

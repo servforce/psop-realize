@@ -33,13 +33,15 @@
   logRefreshInFlight: false,
 };
 
+const SEMANTIC_SECTION_FRAME_DISPLAY_LIMIT = 30;
+
 const stageText = {
   uploaded: "已上传到 MinIO，等待解析",
   downloading_source: "正在从 MinIO 读取源视频",
   probing_video: "正在分析视频信息",
   preparing_analysis_proxy: "正在生成 720P H.265 解析代理视频",
   extracting_keyframes: "正在使用本地 FFmpeg 抽取候选业务帧",
-  filtering_frames: "正在进行关键操作时间窗内图像质量过滤",
+  filtering_frames: "正在进行段落时间窗内图像质量过滤",
   deduplicating_frames: "正在进行 HSV+pHash 去重",
   semantic_matching: "正在进行图索引评分",
   generating_wireframes: "正在筛选业务帧并生成线框图",
@@ -168,23 +170,23 @@ document.getElementById("videoLatestUpload").addEventListener("click", () => {
   updateVideoSortButton();
   renderVideoList();
 });
-document.getElementById("uploadStandards").addEventListener("click", uploadStandards);
-document.getElementById("standardFiles").addEventListener("change", () => {
+document.getElementById("uploadStandards")?.addEventListener("click", uploadStandards);
+document.getElementById("standardFiles")?.addEventListener("change", () => {
   uploadSelectedStandards();
 });
-document.getElementById("standardDirectorySearch").addEventListener("input", updateStandardSearchChrome);
-document.getElementById("standardDirectorySearch").addEventListener("keydown", (event) => {
+document.getElementById("standardDirectorySearch")?.addEventListener("input", updateStandardSearchChrome);
+document.getElementById("standardDirectorySearch")?.addEventListener("keydown", (event) => {
   if (event.key === "Enter") {
     event.preventDefault();
     applyStandardSearch();
   }
 });
-document.getElementById("standardSearchButton").addEventListener("click", applyStandardSearch);
-document.getElementById("standardSearchClear").addEventListener("click", clearStandardSearch);
+document.getElementById("standardSearchButton")?.addEventListener("click", applyStandardSearch);
+document.getElementById("standardSearchClear")?.addEventListener("click", clearStandardSearch);
 document.getElementById("backToStandardDirectory")?.addEventListener("click", () => {
   setStandardWorkspaceView("directory");
 });
-document.getElementById("standardLatestUpload").addEventListener("click", () => {
+document.getElementById("standardLatestUpload")?.addEventListener("click", () => {
   state.standardSortOrder = "desc";
   state.standardLatestUploadActive = true;
   updateStandardSortButton();
@@ -215,24 +217,26 @@ dropZone.addEventListener("drop", (event) => {
 });
 
 const standardDropZone = document.getElementById("standardDropZone");
-standardDropZone.addEventListener("click", (event) => {
-  if (event.target.closest("button")) return;
-  uploadStandards();
-});
-standardDropZone.addEventListener("dragover", (event) => {
-  event.preventDefault();
-  standardDropZone.classList.add("drag-over");
-});
-standardDropZone.addEventListener("dragleave", () => standardDropZone.classList.remove("drag-over"));
-standardDropZone.addEventListener("drop", (event) => {
-  event.preventDefault();
-  standardDropZone.classList.remove("drag-over");
-  const files = event.dataTransfer.files;
-  if (files?.length) {
-    document.getElementById("standardFiles").files = files;
-    uploadSelectedStandards();
-  }
-});
+if (standardDropZone) {
+  standardDropZone.addEventListener("click", (event) => {
+    if (event.target.closest("button")) return;
+    uploadStandards();
+  });
+  standardDropZone.addEventListener("dragover", (event) => {
+    event.preventDefault();
+    standardDropZone.classList.add("drag-over");
+  });
+  standardDropZone.addEventListener("dragleave", () => standardDropZone.classList.remove("drag-over"));
+  standardDropZone.addEventListener("drop", (event) => {
+    event.preventDefault();
+    standardDropZone.classList.remove("drag-over");
+    const files = event.dataTransfer.files;
+    if (files?.length) {
+      document.getElementById("standardFiles").files = files;
+      uploadSelectedStandards();
+    }
+  });
+}
 
 async function uploadVideo() {
   const input = document.getElementById("videoFile");
@@ -565,6 +569,8 @@ async function loadActiveVideoTab(id) {
 }
 
 async function loadVideoFrames(id) {
+  const target = document.getElementById("framesTab");
+  if (target) target.innerHTML = '<div class="empty">加载中...</div>';
   const report = await fetchJson(`/api/videos/${id}/semantic-frames`).catch(() => null);
   if (report?.sections) {
     renderSemanticFrameReport(report);
@@ -692,7 +698,7 @@ function renderSemanticFrameReport(report) {
       <span>候选业务帧：${Number(summary.raw_frame_count || 0)}</span>
       <span>候选语义帧：${Number(summary.candidate_frame_count || 0)}</span>
       <span>文本段落：${Number(summary.section_count || sections.length)}</span>
-      <span>关键操作：${Number(summary.visual_operation_count || summary.frame_query_count || 0)}</span>
+      <span>图匹配段落：${Number(summary.query_graph_count || 0)}</span>
     </div>
     <div class="semantic-section-list">
       ${sections.map(renderSemanticSection).join("")}
@@ -702,8 +708,13 @@ function renderSemanticFrameReport(report) {
 
 function renderSemanticSection(section) {
   const rawFrames = Array.isArray(section.raw_frames) ? section.raw_frames : [];
-  const semanticFrames = Array.isArray(section.semantic_frames) ? section.semantic_frames : [];
-  const frameQueryMatches = Array.isArray(section.frame_query_matches) ? section.frame_query_matches : [];
+  const candidateBusinessFramesAll = Array.isArray(section.candidate_business_frames) ? section.candidate_business_frames : rawFrames;
+  const candidateBusinessFrames = candidateBusinessFramesAll.slice(0, SEMANTIC_SECTION_FRAME_DISPLAY_LIMIT);
+  const semanticFramesAll = Array.isArray(section.semantic_frames) ? section.semantic_frames : [];
+  const semanticFrames = semanticFramesAll.slice(0, SEMANTIC_SECTION_FRAME_DISPLAY_LIMIT);
+  const queryGraphMatches = Array.isArray(section.query_graph_matches) ? section.query_graph_matches : [];
+  const candidateTotal = Number(section.candidate_business_frames_total || candidateBusinessFramesAll.length);
+  const semanticTotal = Number(section.semantic_frames_total || semanticFramesAll.length);
   const timeRange = `${section.start_time || formatTimestamp(section.start_seconds || 0)} - ${section.end_time || formatTimestamp(section.end_seconds || 0)}`;
   return `
     <section class="semantic-section">
@@ -713,37 +724,48 @@ function renderSemanticSection(section) {
           <div class="muted">${escapeHtml(timeRange)}</div>
         </div>
       </div>
-      <p class="semantic-section-text">${escapeHtml(section.text || "")}</p>
+      <p class="semantic-section-text"><strong>正文：</strong>${escapeHtml(section.text || "")}</p>
+      ${section.polished_text ? `<p class="semantic-section-text"><strong>润色后正文：</strong>${escapeHtml(section.polished_text)}</p>` : ""}
+      ${section.business_frame_text ? `<p class="semantic-section-text semantic-match-text"><strong>待匹配文本：</strong>${escapeHtml(section.business_frame_text)}</p>` : ""}
       <div class="semantic-frame-block">
-        <h4>候选业务帧</h4>
-        ${rawFrames.length ? `<div class="frames-grid compact-frames-grid">${rawFrames.map((frame) => renderFrameCard(frame, { score: false })).join("")}</div>` : '<div class="empty">该段落时间范围内暂无候选业务帧。</div>'}
+        <h4>候选业务帧${semanticFrameLimitLabel(candidateBusinessFrames.length, candidateTotal)}</h4>
+        ${candidateBusinessFrames.length ? `<div class="frames-grid compact-frames-grid">${candidateBusinessFrames.map((frame) => renderFrameCard(frame, { score: false })).join("")}</div>` : '<div class="empty">该段落时间范围内暂无候选业务帧。</div>'}
       </div>
       <div class="semantic-frame-block">
-        <h4>关键操作分数复核</h4>
-        ${frameQueryMatches.length ? renderFrameQueryMatches(frameQueryMatches) : (semanticFrames.length ? `<div class="frames-grid semantic-frames-grid">${semanticFrames.map((frame) => renderFrameCard(frame, { score: true })).join("")}</div>` : '<div class="empty">暂无语义帧匹配结果。</div>')}
+        <h4>按匹配分数排序的业务帧${queryGraphMatches.length ? "" : semanticFrameLimitLabel(semanticFrames.length, semanticTotal)}</h4>
+        ${queryGraphMatches.length ? renderQueryGraphMatches(queryGraphMatches) : (semanticFrames.length ? `<div class="frames-grid semantic-frames-grid">${semanticFrames.map((frame) => renderFrameCard(frame, { score: true })).join("")}</div>` : '<div class="empty">暂无语义帧匹配结果。</div>')}
       </div>
     </section>
   `;
 }
 
-function renderFrameQueryMatches(matches) {
+function semanticFrameLimitLabel(shown, total) {
+  if (!Number.isFinite(total) || total <= shown) return "";
+  return `（前 ${shown} / 共 ${total}）`;
+}
+
+function renderQueryGraphMatches(matches) {
   return `
     <div class="frame-query-match-list">
       ${matches.map((match) => {
-        const frames = Array.isArray(match.frames) ? match.frames : [];
-        const source = match.frame_queries_source || match.source || "";
-        const sourceLabel = frameQuerySourceLabel(source);
-        const operationTime = match.operation_start_time && match.operation_end_time ? `${match.operation_start_time} - ${match.operation_end_time}` : "";
-        const operationText = match.operation_text || `关键操作 ${Number(match.operation_index || match.query_index || 0)}`;
+        const framesAll = Array.isArray(match.frames) ? match.frames : [];
+        const frames = framesAll.slice(0, SEMANTIC_SECTION_FRAME_DISPLAY_LIMIT);
+        const framesTotal = Number(match.frames_total || framesAll.length);
+        const source = match.source || "";
+        const sourceLabel = queryGraphSourceLabel(source);
+        const sectionTime = match.section_start_time && match.section_end_time ? `${match.section_start_time} - ${match.section_end_time}` : "";
+        const sectionTitle = match.section_title || `段落 ${Number(match.query_graph_index || match.query_index || 0)}`;
+        const businessFrameText = match.business_frame_text || "";
         return `
           <section class="frame-query-match">
             <div class="frame-query-text">
-              <strong>${Number(match.operation_index || match.query_index || 0)}. ${escapeHtml(operationText)}</strong>
-              ${sourceLabel ? `<em class="frame-query-source ${source === "fallback_title_text" ? "fallback" : ""}">${escapeHtml(sourceLabel)}</em>` : ""}
-              ${operationTime ? `<small>${escapeHtml(operationTime)}</small>` : ""}
-              <span>${escapeHtml(match.query_text || match.graph_query_text || "")}</span>
+              <strong>${Number(match.query_graph_index || match.query_index || 0)}. ${escapeHtml(sectionTitle)}</strong>
+              ${sourceLabel ? `<em class="frame-query-source">${escapeHtml(sourceLabel)}</em>` : ""}
+              ${sectionTime ? `<small>${escapeHtml(sectionTime)}</small>` : ""}
+              ${businessFrameText ? `<span>${escapeHtml(businessFrameText)}</span>` : ""}
             </div>
-            ${frames.length ? `<div class="frames-grid semantic-frames-grid">${frames.map((frame) => renderFrameCard(frame, { score: true })).join("")}</div>` : '<div class="empty">该关键操作暂无候选帧分数。</div>'}
+            ${framesTotal > frames.length ? `<div class="muted">仅展示前 ${frames.length} 张，共 ${framesTotal} 张。</div>` : ""}
+            ${frames.length ? `<div class="semantic-ranked-list">${frames.map(renderSemanticMatchedFrameCard).join("")}</div>` : '<div class="empty">该段落暂无候选帧分数。</div>'}
           </section>
         `;
       }).join("")}
@@ -751,10 +773,8 @@ function renderFrameQueryMatches(matches) {
   `;
 }
 
-function frameQuerySourceLabel(source) {
-  if (source === "fallback_title_text") return "fallback";
-  if (source === "model") return "model";
-  if (source === "visual_operations") return "关键操作";
+function queryGraphSourceLabel(source) {
+  if (source === "section_query_graph") return "section.query_graph";
   return "";
 }
 
@@ -773,6 +793,41 @@ function renderFrameCard(frame, options = {}) {
       </figcaption>
     </figure>
   `;
+}
+
+function renderSemanticMatchedFrameCard(frame) {
+  const timestamp = frame.timestamp_time || formatTimestamp(frame.timestamp_seconds || 0);
+  const score = Math.max(0, Math.min(1, Number(frame.score || 0)));
+  const scoreText = Number.isFinite(Number(frame.score)) ? Number(frame.score).toFixed(4) : "";
+  const maskUrl = frame.mask_image ? `data:image/jpeg;base64,${frame.mask_image}` : "";
+  const bboxUrl = frame.bbox_image ? `data:image/jpeg;base64,${frame.bbox_image}` : "";
+  const previewUrl = maskUrl || bboxUrl || frame.url || "";
+  return `
+    <article class="semantic-match-card">
+      <button class="semantic-match-image" type="button" onclick="openImagePreview('${escapeJsString(previewUrl)}')" aria-label="预览业务帧">
+        <img src="${escapeHtml(previewUrl || frame.url || "")}" alt="业务帧 ${escapeHtml(timestamp)}" loading="lazy" />
+      </button>
+      <div class="semantic-match-body">
+        <div class="semantic-match-head">
+          <strong>#${Number(frame.rank || 0)} ${escapeHtml(timestamp)}</strong>
+          <span>${escapeHtml(scoreText)}</span>
+        </div>
+        <div class="business-frame-scorebar semantic-match-scorebar" aria-label="匹配分数">
+          <div style="width:${score * 100}%"></div>
+        </div>
+        <div class="semantic-match-actions">
+          <button class="secondary small" type="button" ${maskUrl ? "" : "disabled"} onclick="openImagePreview('${escapeJsString(maskUrl)}')">查看 mask 图像</button>
+          ${bboxUrl ? `<button class="secondary small" type="button" onclick="openImagePreview('${escapeJsString(bboxUrl)}')">查看 bbox 图像</button>` : ""}
+        </div>
+      </div>
+    </article>
+  `;
+}
+
+function renderSemanticObjectPill(obj) {
+  const area = Number(obj.mask_area_ratio ?? obj.bbox_area_ratio ?? 0);
+  const confidence = Number(obj.confidence || 0);
+  return `<span>${escapeHtml(obj.label || "unknown")} · ${(confidence * 100).toFixed(0)}% · ${(area * 100).toFixed(1)}%</span>`;
 }
 
 function rawFrameFilterLabel(status) {
@@ -2676,17 +2731,648 @@ function escapeJsString(value) {
   return String(value ?? "").replace(/\\/g, "\\\\").replace(/'/g, "\\'");
 }
 
+const standardLibraryState = {
+  summary: null,
+  atlas: null,
+  catalog: {
+    query: "",
+    source: "",
+    page: 1,
+    pageSize: 10,
+    data: null,
+  },
+  activeHomeTab: "atlas",
+  activePage: "home",
+  previousPage: "home",
+  searchResult: null,
+  historyOpen: false,
+  history: null,
+  detail: null,
+  detailReturnPage: "home",
+  detailMarkdownKind: "overview",
+  detailMarkdownView: "rendered",
+};
+
+function prepareStandardWorkbenchLayout() {
+  document.querySelector('.sidebar button[data-view="standards"]')?.remove();
+  const standardWorkbenchButton = document.querySelector('.sidebar button[data-view="standardSearch"]');
+  if (standardWorkbenchButton) standardWorkbenchButton.textContent = "标准库";
+  const section = document.getElementById("standardSearch");
+  if (!section) return;
+  section.innerHTML = `
+    <div class="standard-library-app" data-standard-library-page="home">
+      <div class="standard-library-page standard-library-home-page" data-standard-library-panel="home">
+        <div class="standard-library-searchbar">
+          <div class="standard-library-search-input">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7" /><path d="m16.5 16.5 4 4" /></svg>
+            <input id="standardSearchText" type="search" placeholder="输入作业场景、对象、工序、风险点，检索相关标准" />
+          </div>
+          <button id="searchStandards" class="standard-library-search-button" type="button">检索</button>
+        </div>
+        <div id="standardLibrarySummary" class="standard-library-summary muted">正在读取标准库摘要。</div>
+        <div class="standard-library-tabs" role="tablist" aria-label="标准库首页视图">
+          <button id="standardLibraryAtlasTab" class="result-tab active" type="button" data-standard-library-tab="atlas">标准可视化</button>
+          <button id="standardLibraryLatestTab" class="result-tab" type="button" data-standard-library-tab="latest">最新标准列表</button>
+        </div>
+        <section id="standardLibraryAtlasPanel" class="standard-library-tab-panel">
+          <div id="standardLibraryAtlas" class="standard-library-atlas">
+            <div class="empty">正在读取 Atlas。</div>
+          </div>
+        </section>
+        <section id="standardLibraryLatestPanel" class="standard-library-tab-panel hidden">
+          <div class="standard-library-catalog-tools">
+            <div class="standard-library-search-input compact">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7" /><path d="m16.5 16.5 4 4" /></svg>
+              <input id="standardLibraryCatalogQuery" type="search" placeholder="标准号或标准名称，检索范围为全部有效标准" />
+            </div>
+            <button id="standardLibraryCatalogSearch" class="secondary" type="button">检索全部</button>
+            <select id="standardLibrarySourceFilter" aria-label="标准来源">
+              <option value="">全部来源</option>
+              <option value="national">国家标准</option>
+              <option value="industry">行业标准</option>
+              <option value="local">地方标准</option>
+            </select>
+          </div>
+          <div id="standardLibraryCatalog" class="standard-library-table-wrap">
+            <div class="empty">正在读取最新标准列表。</div>
+          </div>
+        </section>
+      </div>
+
+      <div class="standard-library-page standard-library-result-page hidden" data-standard-library-panel="result">
+        <button class="standard-library-round-back" type="button" onclick="backToStandardLibraryHome()" aria-label="返回">‹</button>
+        <div class="standard-library-searchbar">
+          <div class="standard-library-search-input">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7" /><path d="m16.5 16.5 4 4" /></svg>
+            <input id="standardSearchResultText" type="search" placeholder="输入作业场景、对象、工序、风险点，检索相关标准" />
+          </div>
+          <button id="searchStandardsFromResult" class="standard-library-search-button" type="button">检索</button>
+        </div>
+        <div class="standard-library-result-head">
+          <div>
+            <h2>标准检索结果</h2>
+            <div id="standardLibrarySearchMeta" class="muted">暂无检索结果。</div>
+          </div>
+          <div class="standard-library-history-anchor">
+            <button id="standardLibraryHistoryButton" class="secondary" type="button">检索历史</button>
+            <div id="standardLibraryHistoryPopover" class="standard-library-history-popover hidden"></div>
+          </div>
+        </div>
+        <div id="standardSearchResult" class="standard-library-table-wrap">
+          <div class="empty">暂无检索结果。</div>
+        </div>
+      </div>
+
+      <div class="standard-library-page standard-library-detail-page hidden" data-standard-library-panel="detail">
+        <button class="standard-library-round-back" type="button" onclick="backFromStandardLibraryDetail()" aria-label="返回">‹</button>
+        <div id="standardDetail" class="standard-library-detail">
+          <div class="empty">请选择标准查看详情。</div>
+        </div>
+      </div>
+    </div>
+  `;
+
+  document.getElementById("searchStandards")?.addEventListener("click", () => searchStandards("standardSearchText"));
+  document.getElementById("searchStandardsFromResult")?.addEventListener("click", () => searchStandards("standardSearchResultText"));
+  document.getElementById("standardSearchText")?.addEventListener("keydown", standardLibrarySearchKeydown);
+  document.getElementById("standardSearchResultText")?.addEventListener("keydown", standardLibrarySearchKeydown);
+  document.getElementById("standardLibraryCatalogQuery")?.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter") return;
+    event.preventDefault();
+    applyStandardLibraryCatalogSearch();
+  });
+  document.getElementById("standardLibraryCatalogSearch")?.addEventListener("click", applyStandardLibraryCatalogSearch);
+  document.getElementById("standardLibrarySourceFilter")?.addEventListener("change", () => {
+    standardLibraryState.catalog.source = document.getElementById("standardLibrarySourceFilter")?.value || "";
+    standardLibraryState.catalog.page = 1;
+    loadStandardLibraryCatalog();
+  });
+  document.querySelectorAll("[data-standard-library-tab]").forEach((button) => {
+    button.addEventListener("click", () => setStandardLibraryHomeTab(button.dataset.standardLibraryTab));
+  });
+  document.getElementById("standardLibraryHistoryButton")?.addEventListener("click", toggleStandardLibraryHistory);
+  document.addEventListener("click", closeStandardLibraryHistoryOnOutsideClick);
+}
+
+function standardLibrarySearchKeydown(event) {
+  if (event.key !== "Enter") return;
+  event.preventDefault();
+  searchStandards(event.target.id);
+}
+
+async function loadStandardLibraryHome() {
+  await Promise.all([
+    loadStandardLibrarySummary(),
+    loadStandardLibraryAtlas(),
+    loadStandardLibraryCatalog(),
+  ]);
+}
+
+async function loadActiveStandards() {
+  await loadStandardLibrarySummary();
+  await loadStandardLibraryCatalog();
+  return standardLibraryState.catalog.data?.items || [];
+}
+
+async function loadStandards() {
+  await loadStandardLibraryCatalog();
+  return standardLibraryState.catalog.data?.items || [];
+}
+
+async function loadLatestStandardUpdate() {
+  await loadStandardLibrarySummary();
+  return standardLibraryState.summary;
+}
+
+function startStandardUpdatePolling() {
+  return null;
+}
+
+async function loadStandardLibrarySummary() {
+  const target = document.getElementById("standardLibrarySummary");
+  try {
+    standardLibraryState.summary = await fetchJson("/api/standard-library/summary");
+    renderStandardLibrarySummary();
+  } catch (error) {
+    if (target) target.innerHTML = `<span class="error">读取标准库摘要失败：${escapeHtml(error.message)}</span>`;
+  }
+}
+
+function renderStandardLibrarySummary() {
+  const target = document.getElementById("standardLibrarySummary");
+  const summary = standardLibraryState.summary;
+  if (!target || !summary) return;
+  const updateTime = summary.latest_update_at ? formatBeijingDateTime(summary.latest_update_at) : "暂无";
+  const status = standardLibraryCycleStatusLabel(summary.cycle_status);
+  const running = summary.cycle_status === "running";
+  const counts = running
+    ? "周期更新 · 进行中"
+    : `新增 ${Number(summary.new_active_count || 0)} · 失效 ${Number(summary.expired_count || 0)} · 失败 ${Number(summary.failed_count || 0)}`;
+  target.textContent = `当前有效标准 ${Number(summary.effective_standard_count || 0)} 条　最近周期更新时间：${updateTime}　周期状态：${status}　${counts}`;
+}
+
+function standardLibraryCycleStatusLabel(status) {
+  return {
+    not_started: "未开始",
+    running: "进行中",
+    completed: "已完成",
+    completed_with_failures: "已完成，有失败项",
+    failed: "失败",
+  }[status] || status || "未知";
+}
+
+async function loadStandardLibraryAtlas() {
+  const target = document.getElementById("standardLibraryAtlas");
+  try {
+    standardLibraryState.atlas = await fetchJson("/api/standard-library/atlas");
+    renderStandardLibraryAtlas();
+  } catch (error) {
+    if (target) target.innerHTML = `<div class="error">读取 Atlas 失败：${escapeHtml(error.message)}</div>`;
+  }
+}
+
+function renderStandardLibraryAtlas() {
+  const target = document.getElementById("standardLibraryAtlas");
+  const atlas = standardLibraryState.atlas;
+  if (!target || !atlas) return;
+  if (atlas.status !== "ready" || !atlas.data?.ids?.length) {
+    const message = atlas.status === "generating" ? "Atlas 正在生成中。" : "Atlas 暂无数据。";
+    target.innerHTML = `
+      <div class="standard-library-atlas-empty">
+        <strong>${escapeHtml(message)}</strong>
+        <span>当前有效标准 ${Number(atlas.effective_standard_count || 0)} 条，已投影 ${Number(atlas.projected_count || 0)} 条。</span>
+      </div>
+    `;
+    return;
+  }
+  const data = atlas.data;
+  const bounds = standardLibraryAtlasBounds(data.x, data.y);
+  const points = data.ids.map((id, index) => {
+    const left = standardLibraryNormalizePoint(data.x[index], bounds.minX, bounds.maxX);
+    const top = 100 - standardLibraryNormalizePoint(data.y[index], bounds.minY, bounds.maxY);
+    const category = Number(data.category[index] || 0);
+    const color = atlas.categories?.[category]?.color || "#2f80ed";
+    const name = data.names[index] || "";
+    const code = data.codes[index] || "";
+    return `
+      <button class="standard-library-atlas-point" style="left:${left}%; top:${top}%; --point-color:${escapeHtml(color)}"
+        title="${escapeHtml(compactDetails([code, name]))}"
+        onclick="showStandard('${escapeJsString(id)}')"
+        aria-label="${escapeHtml(compactDetails([code, name]))}">
+      </button>
+    `;
+  }).join("");
+  target.innerHTML = `
+    <div class="standard-library-atlas-meta">
+      <span>投影版本 ${escapeHtml(atlas.version || "-")}</span>
+      <span>有效 ${Number(atlas.effective_standard_count || 0)}</span>
+      <span>已投影 ${Number(atlas.projected_count || 0)}</span>
+      <span>更新 ${escapeHtml(formatBeijingDateTime(atlas.updated_at))}</span>
+    </div>
+    <div class="standard-library-atlas-canvas">${points}</div>
+    <div class="standard-library-atlas-legend">
+      ${(atlas.categories || []).map((item) => `
+        <span><i style="background:${escapeHtml(item.color)}"></i>${escapeHtml(item.name)} ${Number(item.count || 0)}</span>
+      `).join("")}
+    </div>
+  `;
+}
+
+function standardLibraryAtlasBounds(xs = [], ys = []) {
+  const cleanX = xs.map(Number).filter(Number.isFinite);
+  const cleanY = ys.map(Number).filter(Number.isFinite);
+  return {
+    minX: Math.min(...cleanX),
+    maxX: Math.max(...cleanX),
+    minY: Math.min(...cleanY),
+    maxY: Math.max(...cleanY),
+  };
+}
+
+function standardLibraryNormalizePoint(value, min, max) {
+  if (!Number.isFinite(Number(value)) || !Number.isFinite(min) || !Number.isFinite(max) || min === max) return 50;
+  return 6 + ((Number(value) - min) / (max - min)) * 88;
+}
+
+async function loadStandardLibraryCatalog() {
+  const target = document.getElementById("standardLibraryCatalog");
+  const catalog = standardLibraryState.catalog;
+  const params = new URLSearchParams({
+    page: String(catalog.page),
+    page_size: String(catalog.pageSize),
+  });
+  if (catalog.query) params.set("query", catalog.query);
+  if (catalog.source) params.set("source", catalog.source);
+  try {
+    catalog.data = await fetchJson(`/api/standard-library/catalog?${params}`);
+    renderStandardLibraryCatalog();
+  } catch (error) {
+    if (target) target.innerHTML = `<div class="error">读取标准目录失败：${escapeHtml(error.message)}</div>`;
+  }
+}
+
+function applyStandardLibraryCatalogSearch() {
+  standardLibraryState.catalog.query = document.getElementById("standardLibraryCatalogQuery")?.value.trim() || "";
+  standardLibraryState.catalog.page = 1;
+  loadStandardLibraryCatalog();
+}
+
+function renderStandardLibraryCatalog() {
+  const target = document.getElementById("standardLibraryCatalog");
+  const data = standardLibraryState.catalog.data;
+  if (!target || !data) return;
+  target.innerHTML = `
+    ${renderStandardLibraryTable(data.items || [], { showScore: false })}
+    ${renderStandardLibraryPagination(data)}
+  `;
+}
+
+function renderStandardLibraryPagination(data) {
+  const page = Number(data.page || 1);
+  const totalPages = Number(data.total_pages || 0);
+  const total = Number(data.total || 0);
+  return `
+    <div class="standard-library-pagination">
+      <div>
+        每页显示
+        <select onchange="setStandardLibraryPageSize(this.value)">
+          ${[10, 25, 50].map((size) => `<option value="${size}" ${Number(data.page_size || 10) === size ? "selected" : ""}>${size}</option>`).join("")}
+        </select>
+        条，共 ${total} 条标准，${totalPages ? `${page} / ${totalPages}` : "0 / 0"}
+      </div>
+      <div class="standard-library-page-buttons">
+        <button class="secondary small" type="button" onclick="setStandardLibraryCatalogPage(${page - 1})" ${page <= 1 ? "disabled" : ""}>上一页</button>
+        <button class="secondary small" type="button" onclick="setStandardLibraryCatalogPage(${page + 1})" ${!totalPages || page >= totalPages ? "disabled" : ""}>下一页</button>
+      </div>
+    </div>
+  `;
+}
+
+window.setStandardLibraryCatalogPage = (page) => {
+  const totalPages = Number(standardLibraryState.catalog.data?.total_pages || 0);
+  standardLibraryState.catalog.page = Math.max(1, totalPages ? Math.min(totalPages, Number(page || 1)) : 1);
+  loadStandardLibraryCatalog();
+};
+
+window.setStandardLibraryPageSize = (value) => {
+  standardLibraryState.catalog.pageSize = Math.max(1, Math.min(50, Number(value || 10)));
+  standardLibraryState.catalog.page = 1;
+  loadStandardLibraryCatalog();
+};
+
+function setStandardLibraryHomeTab(tab) {
+  standardLibraryState.activeHomeTab = tab === "latest" ? "latest" : "atlas";
+  document.querySelectorAll("[data-standard-library-tab]").forEach((button) => {
+    button.classList.toggle("active", button.dataset.standardLibraryTab === standardLibraryState.activeHomeTab);
+  });
+  document.getElementById("standardLibraryAtlasPanel")?.classList.toggle("hidden", standardLibraryState.activeHomeTab !== "atlas");
+  document.getElementById("standardLibraryLatestPanel")?.classList.toggle("hidden", standardLibraryState.activeHomeTab !== "latest");
+}
+
+async function searchStandards(sourceInputId = "standardSearchText") {
+  const query = document.getElementById(sourceInputId)?.value.trim() || "";
+  if (!query) return alert("请输入检索文本");
+  syncStandardSearchInputs(query);
+  setStandardSearchWorkspaceView("result");
+  state.lastStandardSearchAt = new Date();
+  standardLibraryState.searchResult = null;
+  renderStandardSearchResult({ query, matches: [], result_count: 0, searched_at: state.lastStandardSearchAt.toISOString(), loading: true });
+  try {
+    const result = await fetchJson(`/api/standard-library/search?query=${encodeURIComponent(query)}&limit=20`, { method: "POST" });
+    standardLibraryState.searchResult = result;
+    renderStandardSearchResult(result);
+  } catch (error) {
+    const target = document.getElementById("standardSearchResult");
+    if (target) target.innerHTML = `<div class="error">检索失败：${escapeHtml(error.message)}</div>`;
+  }
+}
+
+function setStandardSearchWorkspaceView(view) {
+  const next = view === "result" || view === "detail" ? view : "home";
+  standardLibraryState.activePage = next;
+  const app = document.querySelector(".standard-library-app");
+  if (app) app.dataset.standardLibraryPage = next;
+  document.querySelectorAll("[data-standard-library-panel]").forEach((panel) => {
+    panel.classList.toggle("hidden", panel.dataset.standardLibraryPanel !== next);
+  });
+  document.getElementById("standardSearch")?.scrollIntoView({ block: "start" });
+}
+
+function syncStandardSearchInputs(query) {
+  const value = String(query ?? "");
+  const homeInput = document.getElementById("standardSearchText");
+  const resultInput = document.getElementById("standardSearchResultText");
+  if (homeInput) homeInput.value = value;
+  if (resultInput) resultInput.value = value;
+}
+
+function renderStandardSearchResult(result) {
+  const target = document.getElementById("standardSearchResult");
+  const meta = document.getElementById("standardLibrarySearchMeta");
+  if (!target) return "";
+  const matches = result.matches || [];
+  const searchedAt = result.searched_at || (state.lastStandardSearchAt ? state.lastStandardSearchAt.toISOString() : "");
+  if (meta) {
+    if (result.loading) {
+      meta.textContent = "正在检索标准。";
+    } else {
+      meta.innerHTML = `共 <strong>${Number(result.result_count ?? matches.length)}</strong> 条检索结果，检索时间：${escapeHtml(formatBeijingDateTime(searchedAt))}`;
+    }
+  }
+  target.innerHTML = result.loading
+    ? "<div class='muted'>正在检索标准...</div>"
+    : `${result.message ? `<div class="muted standard-library-result-message">${escapeHtml(result.message)}</div>` : ""}${renderStandardLibraryTable(matches, { showScore: true })}`;
+  return target.innerHTML;
+}
+
+function renderStandardLibraryTable(items, options = {}) {
+  const showScore = Boolean(options.showScore);
+  if (!items.length) return "<div class='empty'>暂无标准。</div>";
+  return `
+    <table class="standard-library-table">
+      <thead>
+        <tr>
+          <th>序号</th>
+          <th>标准号</th>
+          <th>标准名称</th>
+          <th>来源</th>
+          <th>分类</th>
+          <th>发布日期</th>
+          <th>实施日期</th>
+          ${showScore ? "<th>相似度得分</th>" : ""}
+        </tr>
+      </thead>
+      <tbody>
+        ${items.map((item, index) => {
+          const standardId = item.standard_id || item.id || "";
+          const rank = item.rank || index + 1;
+          return `
+            <tr class="standard-library-click-row" onclick="showStandard('${escapeJsString(standardId)}')">
+              <td>${Number(rank)}</td>
+              <td>${escapeHtml(item.code || "")}</td>
+              <td>${escapeHtml(item.name || item.standard_name || "")}</td>
+              <td>${escapeHtml(item.source_label || sourceLabel(item.source))}</td>
+              <td>${escapeHtml(item.category_label || item.category || "")}</td>
+              <td>${escapeHtml(item.publish_date || "")}</td>
+              <td>${escapeHtml(item.effective_date || "")}</td>
+              ${showScore ? `<td><span class="standard-library-score">${Number(item.score || 0).toFixed(3)}</span></td>` : ""}
+            </tr>
+          `;
+        }).join("")}
+      </tbody>
+    </table>
+  `;
+}
+
+function sourceLabel(source) {
+  return {
+    national: "国家标准",
+    industry: "行业标准",
+    local: "地方标准",
+  }[source] || source || "";
+}
+
+async function toggleStandardLibraryHistory(event) {
+  event?.stopPropagation();
+  const popover = document.getElementById("standardLibraryHistoryPopover");
+  if (!popover) return;
+  standardLibraryState.historyOpen = popover.classList.contains("hidden");
+  popover.classList.toggle("hidden", !standardLibraryState.historyOpen);
+  if (standardLibraryState.historyOpen) await loadStandardSearchHistory();
+}
+
+function closeStandardLibraryHistoryOnOutsideClick(event) {
+  const anchor = document.querySelector(".standard-library-history-anchor");
+  if (!anchor || anchor.contains(event.target)) return;
+  document.getElementById("standardLibraryHistoryPopover")?.classList.add("hidden");
+  standardLibraryState.historyOpen = false;
+}
+
+async function loadStandardSearchHistory() {
+  const target = document.getElementById("standardLibraryHistoryPopover");
+  if (!target) return;
+  target.innerHTML = "<div class='muted'>正在加载检索历史...</div>";
+  try {
+    standardLibraryState.history = await fetchJson("/api/standard-library/search/history?limit=10");
+    target.innerHTML = renderStandardSearchHistory(standardLibraryState.history);
+  } catch (error) {
+    target.innerHTML = `<div class="error">加载检索历史失败：${escapeHtml(error.message)}</div>`;
+  }
+}
+
+function renderStandardSearchHistory(history) {
+  const items = Array.isArray(history) ? history : history.items || [];
+  if (!items.length) return "<div class='muted'>暂无检索历史</div>";
+  return `
+    <div class="standard-library-history-list">
+      ${items.map((item) => `
+        <button class="standard-library-history-item" type="button" onclick="loadStandardLibraryHistorySnapshot('${escapeJsString(item.search_id)}')">
+          <span>${escapeHtml(truncateText(item.query || "无检索文本", 90))}</span>
+          <time>${escapeHtml(formatBeijingDateTime(item.searched_at))}</time>
+        </button>
+      `).join("")}
+    </div>
+  `;
+}
+
+window.loadStandardLibraryHistorySnapshot = async (searchId) => {
+  const target = document.getElementById("standardLibraryHistoryPopover");
+  try {
+    const snapshot = await fetchJson(`/api/standard-library/search/history/${encodeURIComponent(searchId)}`);
+    syncStandardSearchInputs(snapshot.query || "");
+    standardLibraryState.searchResult = {
+      ...snapshot,
+      result_count: snapshot.result_count,
+      searched_at: snapshot.searched_at,
+      matches: snapshot.matches || [],
+    };
+    renderStandardSearchResult(standardLibraryState.searchResult);
+    if (target) target.classList.add("hidden");
+    standardLibraryState.historyOpen = false;
+  } catch (error) {
+    if (target) target.innerHTML = `<div class="error">读取历史快照失败：${escapeHtml(error.message)}</div>`;
+  }
+};
+
+window.backToStandardLibraryHome = () => {
+  setStandardSearchWorkspaceView("home");
+};
+
+window.showStandard = async (id) => {
+  if (!id) return;
+  standardLibraryState.detailReturnPage = standardLibraryState.activePage === "result" ? "result" : "home";
+  setStandardSearchWorkspaceView("detail");
+  const detailTarget = document.getElementById("standardDetail");
+  if (detailTarget) detailTarget.innerHTML = "<div class='empty'>正在加载标准详情。</div>";
+  try {
+    const detail = await fetchJson(`/api/standard-library/${encodeURIComponent(id)}`);
+    standardLibraryState.detail = detail;
+    state.selectedStandardId = id;
+    state.selectedStandardDetail = detail;
+    standardLibraryState.detailMarkdownKind = "overview";
+    state.activeStandardMarkdownKind = "overview";
+    renderStandardDetail(detail);
+    await loadMarkdown(id, "overview");
+  } catch (error) {
+    if (detailTarget) detailTarget.innerHTML = `<div class="error">加载标准详情失败：${escapeHtml(error.message)}</div>`;
+  }
+};
+
+window.backFromStandardLibraryDetail = () => {
+  setStandardSearchWorkspaceView(standardLibraryState.detailReturnPage || "home");
+};
+
+function renderStandardDetail(standard) {
+  const target = document.getElementById("standardDetail");
+  if (!target) return;
+  const standardId = standard.standard_id || standard.id || "";
+  const markdownLabels = {
+    overview: "overview.md",
+    structure: "structure.md",
+    logic: "logic.md",
+    body: "body.md",
+  };
+  const tabs = ["overview", "structure", "logic", "body"].map((kind) => {
+    const available = Boolean(standard.markdown?.[kind]?.available);
+    return `<button class="result-tab ${standardLibraryState.detailMarkdownKind === kind ? "active" : ""}" data-standard-kind="${kind}" type="button" onclick="loadMarkdown('${escapeJsString(standardId)}','${kind}')" ${available ? "" : ""}>${markdownLabels[kind]}</button>`;
+  }).join("");
+  const officialUrl = standard.detail_url || standard.online_url || standard.pdf_url || "";
+  target.innerHTML = `
+    <div class="standard-library-detail-head">
+      <div>
+        <h2>
+          ${escapeHtml(standard.name || "未知标准")}
+          ${officialUrl ? `<a class="standard-library-source-logo" href="${escapeHtml(officialUrl)}" target="_blank" rel="noopener noreferrer" title="打开官网链接">${escapeHtml(sourceShortLabel(standard.source))}</a>` : ""}
+        </h2>
+        <div class="standard-library-detail-meta">
+          ${escapeHtml(compactDetails([
+            standard.code,
+            compactDetails([standard.source_label || sourceLabel(standard.source), standard.category_label || standard.category], " / "),
+            standard.publish_date ? `发布时间 ${standard.publish_date}` : "",
+            standard.effective_date ? `实施时间 ${standard.effective_date}` : "",
+          ]))}
+        </div>
+      </div>
+    </div>
+    <div class="standard-library-detail-source">
+      <span>官网状态：${escapeHtml(standard.official_status || "")}</span>
+      ${officialUrl ? `<a href="${escapeHtml(officialUrl)}" target="_blank" rel="noopener noreferrer">官网链接</a>` : "<span>暂无官网链接</span>"}
+    </div>
+    <div class="result-tabs">${tabs}</div>
+    <div class="standard-markdown-tab">
+      <div class="markdown-result">
+        <div class="video-markdown-toolbar">
+          <div class="video-markdown-switch" aria-label="Markdown 显示模式">
+            <button type="button" data-standard-markdown-view="rendered" onclick="setStandardMarkdownView('rendered')">视图</button>
+            <button type="button" data-standard-markdown-view="source" onclick="setStandardMarkdownView('source')">源码</button>
+          </div>
+        </div>
+        <button class="markdown-copy-button standard-markdown-copy-button" onclick="copyActiveStandardMarkdown()" aria-label="复制当前 Markdown">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <rect x="9" y="9" width="10" height="10" rx="2" />
+            <rect x="5" y="5" width="10" height="10" rx="2" />
+          </svg>
+          <span>复制</span>
+        </button>
+        <div id="standardMarkdownRendered" class="standard-markdown-rendered">
+          <div class="empty">正在加载 overview.md...</div>
+        </div>
+        <pre id="standardMarkdown" class="hidden">正在加载 overview.md...</pre>
+      </div>
+    </div>
+  `;
+  applyStandardMarkdownView();
+}
+
+function sourceShortLabel(source) {
+  return {
+    national: "GB",
+    industry: "HB",
+    local: "DB",
+  }[source] || "STD";
+}
+
+window.loadMarkdown = async (id, kind) => {
+  standardLibraryState.detailMarkdownKind = kind;
+  state.activeStandardMarkdownKind = kind;
+  document.querySelectorAll("[data-standard-kind]").forEach((button) => {
+    button.classList.toggle("active", button.dataset.standardKind === kind);
+  });
+  const label = standardMarkdownLabel(kind);
+  setStandardMarkdownContent(`正在加载 ${label}...`, { placeholder: true });
+  const response = await fetch(`/api/standard-library/${encodeURIComponent(id)}/markdown/${encodeURIComponent(kind)}`).catch(() => null);
+  if (!response || !response.ok) {
+    setStandardMarkdownContent(`${label} 暂无数据。`, { placeholder: true });
+    return;
+  }
+  const markdown = await response.text();
+  setStandardMarkdownContent(markdown || `${label} 暂无数据。`, { placeholder: !markdown });
+};
+
+window.previewSearchMarkdown = async (standardId, kind, previewId) => {
+  const preview = document.getElementById(previewId);
+  if (!preview) return;
+  preview.textContent = `正在加载 ${kind}.md...`;
+  try {
+    const markdown = await fetch(`/api/standard-library/${encodeURIComponent(standardId)}/markdown/${kind}`).then((r) => {
+      if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
+      return r.text();
+    });
+    preview.textContent = markdown || "暂无内容。";
+    preview.dataset.loadedKind = kind;
+  } catch (error) {
+    preview.textContent = `加载失败：${error.message}`;
+  }
+};
+
 async function bootstrapApp() {
   await loadRuntimeConfig();
   prepareStandardWorkbenchLayout();
   loadVideos();
-  loadStandards();
-  loadActiveStandards();
-  loadLatestOpenstdCrawl();
-  await loadLatestStandardUpdate();
-  startStandardUpdatePolling();
+  await loadStandardLibraryHome();
 }
 
+// ============================================
 bootstrapApp().catch((error) => {
   console.error("failed to bootstrap app", error);
 });

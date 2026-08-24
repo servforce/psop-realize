@@ -11,7 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
-from app.models.entities import VideoFrame, VideoJob
+from app.models.standard_library import VideoFrame, VideoJob
 from app.services.audit import finish_call, logged_call_with_session
 from app.services.storage import storage_service
 from app.services.transcript_tree import clip_text, extract_chat_content, parse_json_content
@@ -307,6 +307,10 @@ def transcript_sections_for_prompt(tree: dict[str, Any] | None) -> list[dict[str
                 "index": section.get("index"),
                 "title": str(section.get("title") or "")[:120],
                 "text": clip_text(str(section.get("text") or ""), 1200),
+                "asr_text": clip_text(str(section.get("text") or ""), 1200),
+                "polished_text": clip_text(str(section.get("polished_text") or ""), 1200),
+                "business_frame_text": clip_text(str(section.get("business_frame_text") or ""), 1200),
+                "query_graph": section.get("query_graph") if isinstance(section.get("query_graph"), dict) else {},
                 "start_seconds": section.get("start_seconds"),
                 "end_seconds": section.get("end_seconds"),
                 "time_note": "time range is only a weak reference and may be inaccurate",

@@ -11,4 +11,10 @@ router = APIRouter(prefix="/api", tags=["config"])
 def get_runtime_config():
     return {
         "standard_update_scheduler_enabled": settings.standard_update_scheduler_enabled,
+        "standard_update_national_enabled": settings.standard_update_national_enabled,
+        "standard_update_industry_enabled": settings.standard_update_industry_enabled,
+        "standard_update_local_enabled": settings.standard_update_local_enabled,
+        "standard_update_industry_categories": list(settings.standard_update_industry_categories),
+        "standard_update_local_categories": list(settings.standard_update_local_categories),
+        "standard_update_sacinfo_require_categories": settings.standard_update_sacinfo_require_categories,
     }

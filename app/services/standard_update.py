@@ -17,6 +17,7 @@ from sqlalchemy import or_, select, text
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
+from app.db.standard_library import StandardLibrarySessionLocal
 from app.db.session import SessionLocal
 from app.models.entities import Standard, StandardProcessingJob, StandardSyncItem, StandardSyncJob
 from app.services.openstd_crawl import (
@@ -26,6 +27,14 @@ from app.services.openstd_crawl import (
     openstd_pdf_filename,
     openstd_standard_id,
 )
+from app.services.standard_library_collect import (
+    mirror_standard_library_item,
+    mirror_standard_library_job,
+    upsert_national_standard_from_raw,
+)
+from app.services.standard_library_atlas import standard_library_atlas_service
+from app.services.standard_library_index import standard_library_index_service
+from app.services.standard_library_materialize import standard_library_materialize_service
 from app.services.standards import is_postgresql_database, standard_service
 from app.services.storage import storage_service
 
@@ -165,6 +174,7 @@ class StandardUpdateService:
                 if options.check_upcoming:
                     self.check_due_upcoming(session, job=job, options=options, summary=summary)
                 self.rotate_check_active(session, job=job, options=options, summary=summary)
+                self.refresh_atlas_after_update(session, job=job, options=options, summary=summary)
                 finish_sync_job(session, job, summary=summary)
                 return summary
             except Exception as exc:
@@ -179,6 +189,13 @@ class StandardUpdateService:
                 job.updated_at = datetime.now(timezone.utc)
                 session.add(job)
                 session.commit()
+                mirror_standard_library_job(
+                    job,
+                    job_type="scheduled_update",
+                    status="failed",
+                    stage="failed",
+                    error_message=str(exc),
+                )
                 return summary
             finally:
                 release_update_lock(session)
@@ -235,6 +252,26 @@ class StandardUpdateService:
                             page_existing += 1
                             summary.unchanged_count += 1
                             job.unchanged_count += 1
+                            library_standard_id = upsert_national_standard_from_raw(
+                                raw,
+                                legacy_standard_id=existing.id,
+                                bucket=existing.source_pdf_bucket or "",
+                                object_key=existing.source_pdf_object_key or "",
+                                checksum=existing.source_pdf_hash or "",
+                                size_bytes=existing.source_pdf_size_bytes,
+                                fingerprint=existing.fingerprint or "",
+                                file_access_type="downloadable" if existing.source_pdf_object_key else "unavailable",
+                            )
+                            mirror_standard_library_item(
+                                job,
+                                raw,
+                                job_type="scheduled_update",
+                                legacy_standard_id=existing.id,
+                                standard_id=library_standard_id,
+                                metadata_action="unchanged",
+                                file_decision="no_download",
+                                file_result="skipped",
+                            )
                             continue
                         page_new += 1
                         self.process_new_standard(
@@ -325,6 +362,24 @@ class StandardUpdateService:
                             download_method=download_method,
                             retry_count=attempt - 1,
                         )
+                        library_standard_id = upsert_national_standard_from_raw(
+                            raw,
+                            detail=payload.get("detail") or {},
+                            legacy_standard_id=standard_id,
+                            file_access_type="unavailable",
+                        )
+                        mirror_standard_library_item(
+                            job,
+                            raw,
+                            job_type="scheduled_update",
+                            legacy_standard_id=standard_id,
+                            standard_id=library_standard_id,
+                            metadata_action="new",
+                            file_decision="unavailable",
+                            file_result="skipped",
+                            retry_count=attempt - 1,
+                            error_message=clean_text(payload.get("reason") or "not_downloadable"),
+                        )
                         return
                     if payload.get("status") != "downloaded":
                         raise RuntimeError(clean_text(payload.get("reason") or "download_failed"))
@@ -337,7 +392,7 @@ class StandardUpdateService:
                         object_key=object_key,
                         path=pdf_path,
                         media_type="application/pdf",
-                        bucket=settings.object_store_standard_bucket,
+                        bucket=settings.standard_library_object_store_bucket,
                     )
                     fingerprint = source_pdf_fingerprint(
                         checksum=stored.checksum,
@@ -370,6 +425,32 @@ class StandardUpdateService:
                         new_fingerprint=fingerprint,
                         retry_count=attempt - 1,
                     )
+                    library_standard_id = upsert_national_standard_from_raw(
+                        raw,
+                        detail=payload.get("detail") or {},
+                        legacy_standard_id=standard_id,
+                        bucket=stored.bucket,
+                        object_key=stored.object_key,
+                        checksum=stored.checksum,
+                        size_bytes=stored.size_bytes,
+                        fingerprint=fingerprint,
+                        file_access_type="downloadable",
+                    )
+                    mirror_standard_library_item(
+                        job,
+                        raw,
+                        job_type="scheduled_update",
+                        legacy_standard_id=standard_id,
+                        standard_id=library_standard_id,
+                        metadata_action="new",
+                        file_decision="download",
+                        file_result="success",
+                        bucket=stored.bucket,
+                        object_key=stored.object_key,
+                        checksum=stored.checksum,
+                        size_bytes=stored.size_bytes,
+                        retry_count=attempt - 1,
+                    )
                     summary.new_count += 1
                     summary.downloaded_count += 1
                     job.new_count += 1
@@ -380,6 +461,7 @@ class StandardUpdateService:
                         session,
                         job=job,
                         standard_id=standard_id,
+                        library_standard_id=library_standard_id,
                         options=options,
                         summary=summary,
                     )
@@ -423,6 +505,17 @@ class StandardUpdateService:
             download_url=clean_text((payload.get("detail") or {}).get("download_url")) if payload else "",
             download_method=clean_text(payload.get("download_method")) if payload else "",
         )
+        mirror_standard_library_item(
+            job,
+            raw,
+            job_type="scheduled_update",
+            legacy_standard_id=standard_id,
+            metadata_action="new",
+            file_decision="download",
+            file_result="failed",
+            retry_count=max(1, options.max_retries),
+            error_message=last_error,
+        )
 
     def materialize_and_index_new_standard(
         self,
@@ -430,54 +523,77 @@ class StandardUpdateService:
         *,
         job: StandardSyncJob,
         standard_id: str,
+        library_standard_id: Any,
         options: NationalUpdateOptions,
         summary: NationalUpdateSummary,
     ) -> None:
+        processing_job = standard_library_materialize_service.enqueue_materialize_job(library_standard_id)
         if options.new_materialize_limit > 0 and summary.materialized_count >= options.new_materialize_limit:
             LOGGER.info(
-                "[new] materialize limit reached standard=%s limit=%s; leave as not_started/not_indexed",
-                standard_id,
+                "[new] standard-library materialize limit reached standard=%s limit=%s; leave as pending",
+                library_standard_id,
                 options.new_materialize_limit,
             )
             return
-        processing_job_id = create_processing_job(session, standard_id=standard_id, job_type="scheduled_update")
+        phase = "materialize"
         try:
-            standard_service.materialize(session, standard_id, job_id=processing_job_id)
-            summary.materialized_count += 1
+            with StandardLibrarySessionLocal() as library_session:
+                standard_library_materialize_service.run_job(
+                    library_session,
+                    processing_job["job_id"],
+                )
+                summary.materialized_count += 1
+                phase = "index"
+                index_job = standard_library_index_service.create_index_job(library_session, library_standard_id)
+                standard_library_index_service.run_job(library_session, index_job.id)
+            summary.indexed_count += 1
         except Exception as exc:
-            summary.materialize_failed_count += 1
+            failure_action = "index_failed" if phase == "index" else "materialize_failed"
+            if failure_action == "index_failed":
+                summary.index_failed_count += 1
+                job.index_failed_count += 1
+            else:
+                summary.materialize_failed_count += 1
+                job.materialize_failed_count += 1
             summary.failed_count += 1
-            job.materialize_failed_count += 1
             job.failed_count += 1
             record_sync_item(
                 session,
                 job=job,
                 raw=raw_from_standard(session, standard_id),
                 standard_id=standard_id,
-                action="materialize_failed",
+                action=failure_action,
                 status="failed",
                 error_message=str(exc),
             )
             return
+
+    def refresh_atlas_after_update(
+        self,
+        session: Session,
+        *,
+        job: StandardSyncJob,
+        options: NationalUpdateOptions,
+        summary: NationalUpdateSummary,
+    ) -> None:
+        if options.dry_run or summary.indexed_count <= 0:
+            return
+        job.stage = "atlas_projection"
+        session.add(job)
+        session.commit()
         try:
-            standard_service.index_standard(session, standard_id)
-            summary.indexed_count += 1
-            finish_processing_job(session, processing_job_id, status="completed", stage="completed", message="scheduled update completed")
+            with StandardLibrarySessionLocal() as library_session:
+                atlas_job = standard_library_atlas_service.create_atlas_job(library_session, priority=500)
+                library_session.commit()
+                result = standard_library_atlas_service.run_job(library_session, atlas_job.id)
+            LOGGER.info("[atlas] refreshed standard-library atlas result=%s", result)
         except Exception as exc:
-            summary.index_failed_count += 1
+            LOGGER.exception("standard library atlas projection failed after scheduled update: %s", exc)
             summary.failed_count += 1
-            job.index_failed_count += 1
             job.failed_count += 1
-            finish_processing_job(session, processing_job_id, status="failed", stage="index_failed", message="index failed", error=str(exc))
-            record_sync_item(
-                session,
-                job=job,
-                raw=raw_from_standard(session, standard_id),
-                standard_id=standard_id,
-                action="index_failed",
-                status="failed",
-                error_message=str(exc),
-            )
+            job.error_message = str(exc)
+            session.add(job)
+            session.commit()
 
     def check_due_upcoming(
         self,
@@ -567,6 +683,31 @@ class StandardUpdateService:
                     status="updated",
                     error_message=f"status {old_status}({old_raw}) -> {latest_status}({latest_raw})",
                 )
+                library_standard_id = upsert_national_standard_from_raw(
+                    raw_from_standard_object(standard),
+                    detail=detail,
+                    legacy_standard_id=standard.id,
+                    bucket=standard.source_pdf_bucket or "",
+                    object_key=standard.source_pdf_object_key or "",
+                    checksum=standard.source_pdf_hash or "",
+                    size_bytes=standard.source_pdf_size_bytes,
+                    fingerprint=standard.fingerprint or "",
+                    file_access_type="downloadable" if standard.source_pdf_object_key else "unavailable",
+                )
+                mirror_standard_library_item(
+                    job,
+                    raw_from_standard_object(standard),
+                    job_type="scheduled_update",
+                    legacy_standard_id=standard.id,
+                    standard_id=library_standard_id,
+                    metadata_action="changed",
+                    status_change_type="official_status",
+                    file_decision="no_download",
+                    file_result="skipped",
+                    official_status_before=old_status,
+                    official_status_after=latest_status,
+                    error_message=f"status {old_status}({old_raw}) -> {latest_status}({latest_raw})",
+                )
                 LOGGER.info(
                     "[status] updated standard=%s code=%s %s -> %s",
                     standard.id,
@@ -590,6 +731,16 @@ class StandardUpdateService:
                 standard_id=standard.id,
                 action="status_check_failed",
                 status="failed",
+                error_message=str(exc),
+            )
+            mirror_standard_library_item(
+                job,
+                raw_from_standard_object(standard),
+                job_type="scheduled_update",
+                legacy_standard_id=standard.id,
+                metadata_action="unchanged",
+                file_decision="no_download",
+                file_result="failed",
                 error_message=str(exc),
             )
 
@@ -623,6 +774,7 @@ def create_sync_job(session: Session, *, trigger_type: str, options: NationalUpd
     )
     session.add(job)
     session.commit()
+    mirror_standard_library_job(job, job_type="scheduled_update", trigger_type="schedule", status="running")
     return job
 
 
@@ -646,6 +798,7 @@ def finish_sync_job(session: Session, job: StandardSyncJob, *, summary: National
     job.updated_at = datetime.now(timezone.utc)
     session.add(job)
     session.commit()
+    mirror_standard_library_job(job, job_type="scheduled_update", trigger_type="schedule", status=job.status)
 
 
 def latest_standard_update_job(session: Session) -> StandardSyncJob | None:

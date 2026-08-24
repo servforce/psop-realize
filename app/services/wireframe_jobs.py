@@ -7,8 +7,8 @@ from datetime import datetime, timezone
 from sqlalchemy import select
 
 from app.core.config import settings
-from app.db.session import SessionLocal
-from app.models.entities import VideoFrame, WireframeJob
+from app.db.standard_library import StandardLibrarySessionLocal
+from app.models.standard_library import VideoFrame, WireframeJob
 from app.services.frame_selection import ensure_frame_selection
 from app.services.wireframes import wireframe_service
 
@@ -18,7 +18,7 @@ def now_utc() -> datetime:
 
 
 def create_wireframe_job(video_id: str) -> WireframeJob:
-    with SessionLocal() as session:
+    with StandardLibrarySessionLocal() as session:
         frames = list(
             session.scalars(
                 select(VideoFrame).where(VideoFrame.video_id == video_id).order_by(VideoFrame.timestamp_ms)
@@ -39,7 +39,7 @@ def create_wireframe_job(video_id: str) -> WireframeJob:
 
 
 def run_wireframe_job(job_id: str) -> None:
-    with SessionLocal() as session:
+    with StandardLibrarySessionLocal() as session:
         job = session.get(WireframeJob, job_id)
         if job is None:
             return
@@ -129,7 +129,7 @@ def complete_job(session, job_id: str) -> None:
 
 
 def latest_wireframe_job(video_id: str) -> WireframeJob | None:
-    with SessionLocal() as session:
+    with StandardLibrarySessionLocal() as session:
         job = session.scalars(
             select(WireframeJob).where(WireframeJob.video_id == video_id).order_by(WireframeJob.created_at.desc())
         ).first()
@@ -139,7 +139,7 @@ def latest_wireframe_job(video_id: str) -> WireframeJob | None:
 
 
 def get_wireframe_job(job_id: str) -> WireframeJob | None:
-    with SessionLocal() as session:
+    with StandardLibrarySessionLocal() as session:
         job = session.get(WireframeJob, job_id)
         if job is not None:
             session.expunge(job)

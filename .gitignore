@@ -12,6 +12,7 @@ __pycache__/
 .ruff_cache/
 .coverage
 htmlcov/
+*.cache
 
 # Virtual environments
 .venv/
@@ -22,10 +23,13 @@ env/
 data/*.db
 data/*.sqlite
 data/*.sqlite3
+datasets/
+runs/
 work/
 weights/
 *.pt
 mobileclip2_b.ts
+.claude/
 
 # Local planning and handoff notes
 meeting-implementation-summary.md
@@ -33,6 +37,7 @@ psop-interface-handoff.md
 需求方案.md
 
 # Logs and temporary files
+tools/standard-collector/logs/
 *.log
 *.tmp
 *.temp

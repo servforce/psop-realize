@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from app.db.session import SessionLocal, init_db
+from app.db.standard_library import StandardLibrarySessionLocal
 from app.services.audit import finish_call, logged_call
 from app.services.standards import standard_service
 from app.services.wireframes import wireframe_service
@@ -54,7 +55,7 @@ def create_server():
     @mcp.tool()
     def generate_frame_wireframe(frame_id: int, caller: str = "local-mcp") -> dict:
         """Generate a Qwen wireframe PNG for one extracted video frame."""
-        with SessionLocal() as session:
+        with StandardLibrarySessionLocal() as session:
             with logged_call(
                 session,
                 interface_type="mcp",

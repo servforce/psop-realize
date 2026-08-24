@@ -3,7 +3,7 @@
 from pathlib import Path
 
 from app.core.config import settings
-from app.models.entities import VideoFrame
+from app.models.standard_library import VideoFrame
 from app.services.asr import local_asr_client
 
 
@@ -334,5 +334,4 @@ def format_timestamp(seconds: float) -> str:
     if hours:
         return f"{hours:02d}:{minutes:02d}:{secs:02d}"
     return f"{minutes:02d}:{secs:02d}"
-
 

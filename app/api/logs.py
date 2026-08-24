@@ -3,15 +3,15 @@ from __future__ import annotations
 from fastapi import APIRouter
 from sqlalchemy import select
 
-from app.db.session import SessionLocal
-from app.models.entities import CallLog
+from app.db.standard_library import StandardLibrarySessionLocal
+from app.models.standard_library import CallLog
 
 router = APIRouter(prefix="/api", tags=["logs"])
 
 
 @router.get("/call-logs")
 def call_logs(limit: int = 100):
-    with SessionLocal() as session:
+    with StandardLibrarySessionLocal() as session:
         rows = session.scalars(select(CallLog).order_by(CallLog.created_at.desc()).limit(min(limit, 500))).all()
         return [call_log_to_dict(row) for row in rows]
 

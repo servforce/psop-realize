@@ -6,17 +6,15 @@ import traceback
 from pathlib import Path
 
 from app.core.config import settings
-from app.db.session import SessionLocal
-from app.models.entities import VideoFrame, VideoJob
+from app.db.standard_library import StandardLibrarySessionLocal
+from app.models.standard_library import VideoFrame, VideoJob
 from app.services.storage import storage_service
 from app.services.video_repository import VideoJobRepository
 from app.services.transcript_tree import (
     attach_media_to_transcript_tree,
     build_markdown_from_transcript_tree,
     build_structured_transcript,
-    build_transcript_raw_cache_info,
-    load_cached_transcript_raw,
-    load_cached_transcript_tree,
+    build_transcript_raw_generation_info,
     render_transcript_tree_text,
 )
 from app.services.video_outputs import (
@@ -88,7 +86,7 @@ def ensure_analysis_video_file(
 
 
 def parse_keyframes(video_id: str, *, finalize: bool = True) -> None:
-    with SessionLocal() as session:
+    with StandardLibrarySessionLocal() as session:
         repo = VideoJobRepository(session)
         job = repo.get_job(video_id)
         if job is None:
@@ -246,7 +244,7 @@ def parse_keyframes(video_id: str, *, finalize: bool = True) -> None:
 
 
 def parse_wireframes(video_id: str, *, wireframe_job_id: str | None = None, finalize: bool = True) -> None:
-    with SessionLocal() as session:
+    with StandardLibrarySessionLocal() as session:
         repo = VideoJobRepository(session)
         job = repo.get_job(video_id)
         if job is None:
@@ -290,7 +288,7 @@ def parse_wireframes(video_id: str, *, wireframe_job_id: str | None = None, fina
 
 
 def parse_transcript(video_id: str, *, finalize: bool = True) -> None:
-    with SessionLocal() as session:
+    with StandardLibrarySessionLocal() as session:
         repo = VideoJobRepository(session)
         job = repo.get_job(video_id)
         if job is None:
@@ -385,7 +383,7 @@ def parse_transcript(video_id: str, *, finalize: bool = True) -> None:
 
 
 def parse_markdown(video_id: str, *, finalize: bool = True) -> None:
-    with SessionLocal() as session:
+    with StandardLibrarySessionLocal() as session:
         repo = VideoJobRepository(session)
         job = repo.get_job(video_id)
         if job is None:
@@ -473,7 +471,7 @@ def parse_markdown(video_id: str, *, finalize: bool = True) -> None:
 
 
 def parse_transcript(video_id: str, *, finalize: bool = True) -> None:
-    with SessionLocal() as session:
+    with StandardLibrarySessionLocal() as session:
         repo = VideoJobRepository(session)
         job = repo.get_job(video_id)
         if job is None:
@@ -483,82 +481,7 @@ def parse_transcript(video_id: str, *, finalize: bool = True) -> None:
             tree_key = transcript_tree_object_key(video_id)
             rendered_key = transcript_rendered_object_key(video_id)
             raw_key = transcript_raw_object_key(video_id)
-            expected_raw_cache = build_transcript_raw_cache_info(job=job)
-
-            cached_tree = load_cached_transcript_tree(job=job)
-            if cached_tree is not None:
-                rendered_text = render_transcript_tree_text(cached_tree)
-                storage_service.upload_bytes(
-                    object_key=rendered_key,
-                    content=rendered_text.encode("utf-8"),
-                    media_type="text/plain; charset=utf-8",
-                    bucket=job.source_bucket,
-                )
-                repo.update_job(
-                    video_id,
-                    status="completed" if finalize else "processing",
-                    stage="completed" if finalize else "structuring_transcript",
-                    progress=100 if finalize else 82,
-                    error_message="",
-                    transcript_object_key=rendered_key,
-                    completed=finalize,
-                )
-                return
-
-            cached_raw = load_cached_transcript_raw(job=job)
-            if cached_raw is not None:
-                duration_ms = int(cached_raw.get("duration_ms") or job.duration_ms or 0)
-                repo.update_job(
-                    video_id,
-                    status="processing",
-                    stage="structuring_transcript",
-                    progress=76,
-                    error_message="复用原始 ASR 结果，正在生成结构化转写",
-                )
-                structured = build_structured_transcript(
-                    job=job,
-                    raw_response=cached_raw.get("raw_response") or {},
-                    frames=[],
-                    wireframes=[],
-                    duration_ms=duration_ms,
-                )
-                structured.tree.setdefault("source", {})
-                structured.tree["source"]["tree_object_key"] = tree_key
-                structured.tree["source"]["rendered_object_key"] = rendered_key
-                structured.tree["source"]["raw_object_key"] = raw_key
-                rendered_text = render_transcript_tree_text(structured.tree)
-                storage_service.upload_bytes(
-                    object_key=tree_key,
-                    content=json.dumps(structured.tree, ensure_ascii=False, indent=2).encode("utf-8"),
-                    media_type="application/json; charset=utf-8",
-                    bucket=job.source_bucket,
-                )
-                storage_service.upload_bytes(
-                    object_key=rendered_key,
-                    content=rendered_text.encode("utf-8"),
-                    media_type="text/plain; charset=utf-8",
-                    bucket=job.source_bucket,
-                )
-                if finalize:
-                    repo.update_job(
-                        video_id,
-                        status="completed",
-                        stage="completed",
-                        progress=100,
-                        error_message="",
-                        transcript_object_key=rendered_key,
-                        completed=True,
-                    )
-                else:
-                    repo.update_job(
-                        video_id,
-                        status="processing",
-                        stage="structuring_transcript",
-                        progress=82,
-                        error_message="",
-                        transcript_object_key=rendered_key,
-                    )
-                return
+            raw_generation = build_transcript_raw_generation_info(job=job)
 
             repo.update_job(
                 video_id,
@@ -585,7 +508,7 @@ def parse_transcript(video_id: str, *, finalize: bool = True) -> None:
                     [],
                 )
                 raw_payload = {
-                    "cache": expected_raw_cache,
+                    "generation": raw_generation,
                     "duration_ms": int(duration_ms or 0),
                     "language": result.get("language"),
                     "provider": result.get("provider"),

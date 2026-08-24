@@ -8,18 +8,17 @@ from typing import Any
 import httpx
 
 from app.core.config import settings
-from app.models.entities import VideoFrame, VideoJob
+from app.models.standard_library import VideoFrame, VideoJob
 from app.services.audit import finish_call, logged_call_with_session
-from app.services.query_graph import QueryGraphError, normalize_query_graph, query_graph_prompt_terms
-from app.services.storage import storage_service
-from app.services.video_outputs import analysis_proxy_video_object_key, transcript_raw_object_key, transcript_tree_object_key
+from app.services.query_graph import QueryGraphError, normalize_query_graph
+from app.services.video_outputs import analysis_proxy_video_object_key
 
 
 RAW_ASR_KIND = "transcript_raw"
 TRANSCRIPT_TREE_KIND = "transcript_tree"
-TRANSCRIPT_RENDERED_KIND = "transcript_rendered"
-RAW_ASR_CACHE_VERSION = "1"
-STRUCTURED_TRANSCRIPT_CACHE_VERSION = "2"
+RAW_ASR_GENERATION_VERSION = "1"
+STRUCTURED_TRANSCRIPT_GENERATION_VERSION = "8"
+STRUCTURED_TRANSCRIPT_MAX_ATTEMPTS = 2
 
 
 @dataclass(frozen=True)
@@ -28,10 +27,10 @@ class TranscriptBuildResult:
     rendered_text: str
 
 
-def build_transcript_raw_cache_info(*, job: VideoJob) -> dict[str, Any]:
+def build_transcript_raw_generation_info(*, job: VideoJob) -> dict[str, Any]:
     return {
         "kind": RAW_ASR_KIND,
-        "version": RAW_ASR_CACHE_VERSION,
+        "version": RAW_ASR_GENERATION_VERSION,
         "source_object_key": job.source_object_key,
         "analysis_proxy_object_key": analysis_proxy_video_object_key(job.id),
         "local_asr_model_label": settings.local_asr_model_label,
@@ -43,67 +42,20 @@ def build_transcript_raw_cache_info(*, job: VideoJob) -> dict[str, Any]:
     }
 
 
-def build_transcript_structure_cache_info(*, job: VideoJob) -> dict[str, Any]:
+def build_transcript_structure_generation_info(*, job: VideoJob) -> dict[str, Any]:
     return {
         "kind": TRANSCRIPT_TREE_KIND,
-        "version": STRUCTURED_TRANSCRIPT_CACHE_VERSION,
-        "raw": build_transcript_raw_cache_info(job=job),
+        "version": STRUCTURED_TRANSCRIPT_GENERATION_VERSION,
+        "raw": build_transcript_raw_generation_info(job=job),
         "transcript_structure_model": settings.transcript_structure_model,
-        "video_max_visual_operations_per_section": int(settings.video_max_visual_operations_per_section),
+        "transcript_business_frame_mode": "section_polished_text_business_frame_text_and_query_graph_v1",
     }
 
 
-def load_cached_transcript_raw(*, job: VideoJob) -> dict[str, Any] | None:
-    try:
-        payload = json.loads(
-            storage_service.get_bytes(
-                bucket=job.source_bucket,
-                object_key=transcript_raw_object_key(job.id),
-            ).decode("utf-8", errors="replace")
-        )
-    except Exception:
-        return None
-    if not isinstance(payload, dict):
-        return None
-    expected_cache = build_transcript_raw_cache_info(job=job)
-    if payload.get("cache") != expected_cache:
-        return None
-    if not isinstance(payload.get("raw_response"), dict):
-        return None
-    return payload
-
-
-def load_cached_transcript_tree(*, job: VideoJob) -> dict[str, Any] | None:
-    try:
-        payload = json.loads(
-            storage_service.get_bytes(
-                bucket=job.source_bucket,
-                object_key=transcript_tree_object_key(job.id),
-            ).decode("utf-8", errors="replace")
-        )
-    except Exception:
-        return None
-    if not isinstance(payload, dict):
-        return None
-    source = payload.get("source")
-    if not isinstance(source, dict):
-        return None
-    cache = source.get("cache")
-    if not isinstance(cache, dict):
-        return None
-    expected_cache = build_transcript_structure_cache_info(job=job)
-    if cache != expected_cache:
-        return None
-    tree = payload.get("tree")
-    if not isinstance(tree, dict):
-        return None
-    return payload
-
-
-def attach_transcript_cache_metadata(*, tree: dict[str, Any], job: VideoJob) -> dict[str, Any]:
+def attach_transcript_generation_metadata(*, tree: dict[str, Any], job: VideoJob) -> dict[str, Any]:
     source = tree.setdefault("source", {})
     if isinstance(source, dict):
-        source["cache"] = build_transcript_structure_cache_info(job=job)
+        source["generation"] = build_transcript_structure_generation_info(job=job)
     return tree
 
 
@@ -116,20 +68,33 @@ def build_structured_transcript(
     duration_ms: int,
 ) -> TranscriptBuildResult:
     source_segments = extract_source_segments(raw_response or {}, duration_ms=duration_ms)
-    semantic_tree = generate_semantic_tree(
-        job=job,
-        source_segments=source_segments,
-        duration_ms=duration_ms,
-    )
-    tree = normalize_transcript_tree(
-        tree=semantic_tree,
-        job=job,
-        source_segments=source_segments,
-        frames=frames,
-        wireframes=wireframes,
-        duration_ms=duration_ms,
-    )
-    attach_transcript_cache_metadata(tree=tree, job=job)
+    retry_feedback = ""
+    last_error: RuntimeError | None = None
+    for attempt in range(1, STRUCTURED_TRANSCRIPT_MAX_ATTEMPTS + 1):
+        semantic_tree = generate_semantic_tree(
+            job=job,
+            source_segments=source_segments,
+            duration_ms=duration_ms,
+            retry_feedback=retry_feedback,
+        )
+        try:
+            tree = normalize_transcript_tree(
+                tree=semantic_tree,
+                job=job,
+                source_segments=source_segments,
+                frames=frames,
+                wireframes=wireframes,
+                duration_ms=duration_ms,
+            )
+            break
+        except RuntimeError as exc:
+            last_error = exc
+            if attempt >= STRUCTURED_TRANSCRIPT_MAX_ATTEMPTS or not is_retryable_transcript_structure_error(exc):
+                raise
+            retry_feedback = build_transcript_structure_retry_feedback(exc)
+    else:
+        raise last_error or RuntimeError("Qwen transcript structuring failed")
+    attach_transcript_generation_metadata(tree=tree, job=job)
     rendered_text = render_transcript_tree_text(tree)
     return TranscriptBuildResult(tree=tree, rendered_text=rendered_text)
 
@@ -168,11 +133,26 @@ def extract_source_segments(raw_response: dict[str, Any], *, duration_ms: int) -
     raise RuntimeError("Local ASR did not return usable sentence-level timestamps")
 
 
+def is_retryable_transcript_structure_error(exc: RuntimeError) -> bool:
+    message = str(exc)
+    return "section.query_graph" in message
+
+
+def build_transcript_structure_retry_feedback(exc: RuntimeError) -> str:
+    return (
+        "后端校验错误："
+        f"{exc}\n\n"
+        "请重新生成完整 transcript JSON。重点修复 section.query_graph：每条 edge 的 from/to "
+        "都必须精确引用 nodes 中存在的 id，并且 query_graph 要与 business_frame_text 的单张核心关键帧画面一致。"
+    )
+
+
 def generate_semantic_tree(
     *,
     job: VideoJob,
     source_segments: list[dict[str, Any]],
     duration_ms: int,
+    retry_feedback: str = "",
 ) -> dict[str, Any]:
     if not source_segments:
         raise RuntimeError("Local ASR did not return sentence-level timestamps")
@@ -181,178 +161,8 @@ def generate_semantic_tree(
         filename=job.filename,
         duration=format_duration(duration_ms),
         source_segments=source_segments,
+        retry_feedback=retry_feedback,
     )
-
-
-def build_transcript_structure_prompt(
-    *,
-    video_title: str,
-    filename: str,
-    duration: str,
-    source_segments: list[dict[str, Any]],
-    max_input_chars: int,
-    max_visual_operations_per_section: int,
-) -> str:
-    source_lines: list[str] = []
-    for segment in source_segments:
-        index = int(segment.get("index") or len(source_lines))
-        start_time = format_timestamp(float(segment.get("start_seconds") or 0.0))
-        end_time = format_timestamp(float(segment.get("end_seconds") or segment.get("start_seconds") or 0.0))
-        text = str(segment.get("text") or "").strip()
-        source_lines.append(f"[{index}] {start_time}-{end_time} {text}")
-
-    source_context = "\n".join(source_lines) if source_lines else "(empty)"
-    return f"""请把下面的 ASR 句子整理成自然、清晰的转写段落。
-硬性规则：
-1. source_sentences 中的每一项都是一个完整句子，不能把一个句子拆到两个段落里。
-2. 每个段落必须输出 source_segment_indices，所有句子索引必须且只能出现一次。
-3. 纯语气词句的索引仍需归入相邻段落，但正文可省略这些语气词。
-4. 可以润色段落 text，并把技术参数里的口语数字规范化，例如“二百二十伏”写成“220伏”，“五十赫兹”写成“50Hz”。
-5. 不要新增原文没有的信息，不要重排有实际语义的句子顺序。
-6. 不要输出 start_seconds / end_seconds，段落时间由系统根据 source_segment_indices 和 ASR 句子时间计算。
-7. 段落必须按原始句子顺序连续分组。
-8. 按文本模型正常分段：围绕同一主题、同一讲解阶段、同一连续操作流程或同一结果说明的句子应合并成一个段落。
-9. 不要为了一个小动作、一个工具变化、一个设备部件变化、一个参数变化或一个短暂画面状态单独拆段。
-10. 只有当讲解主题、操作阶段、业务目的、场景对象或结论明显切换时，才拆成新的段落。
-11. 不要一句话一个段落；除非该句是独立标题、独立结论或与前后内容明显无关，否则应与相邻句合并。
-12. 段落粒度要适中，通常每段包含 2-6 个 ASR 句子；较长但连贯的同一阶段可以继续合并，避免把视频拆成 30 个以上的细碎段落。
-13. 每个段落必须额外输出 visual_operations，用于描述本段中真正需要抽取关键帧的关键操作。
-14. visual_operations 是数组，每个段落最多输出 {max(0, int(max_visual_operations_per_section or 0))} 个关键操作；可以输出空数组。
-15. 不要输出所有动作，只输出“看到对应图片 + 读对应文字，就能更清楚知道这一步怎么操作”的视觉必要操作。
-16. 相邻小动作如果能被同一张完成状态图覆盖，应合并成一个关键操作，不要拆成多个 visual_operations。
-17. 每个 visual_operation 必须输出 operation_text、source_segment_indices、frame_query、visual_terms、priority，并额外输出 query_graph。
-18. operation_text 是给人读的润色操作句，保留原文操作含义，不要编造 ASR 原文没有出现的设备、工具、部件、参数或动作。
-19. visual_operation.source_segment_indices 必须来自该段落的 source_segment_indices，必须按原始句子顺序连续分组，不能把一个 ASR 句子拆到两个关键操作里。
-20. visual_operations 必须按原文句子顺序输出，不要把靠后的操作排到靠前操作之前。
-21. frame_query 用于后续图索引检索与图文结构化匹配，应描述“最适合作为最终业务帧入选”的画面，而不是单纯描述正在发生的动作过程。
-22. frame_query 应优先描述动作完成后或关键状态稳定时的画面，例如器件安装完成、连接位置清楚、读数可见、测试结果状态可辨认。
-23. frame_query 的优先级依次是：主体设备或关键器件清晰可见、操作位置无遮挡、状态或结果可辨认、画面适合转成线框图、工具或手部只作为辅助证据。
-24. 当“正在操作的动作帧”和“操作完成后的清晰状态帧”都能代表该关键操作时，优先生成指向清晰状态帧的 frame_query。
-25. 只有当手部动作是判断该业务操作的必要证据时，才描述手部动作；即使需要描述，也必须让主体设备、关键器件或连接位置作为画面主体。
-26. 不要生成会诱导匹配手部特写、手臂遮挡、人体占主体的 query；不要使用“手部特写”“手臂特写”“人体特写”“正在用手操作的特写”等表达。
-27. 对装配、拧紧、插接、按压、测试等操作，尽量改写为“完成后的安装状态、连接状态、部件位置、读数或测试状态清晰可见”的画面描述，少写“正在拧、正在按、正在拿、正在活动”等过程动作。
-28. frame_query 只写画面中可能直接看见的内容，不写原因、目的、背景、注意事项、风险解释、规范要求、抽象总结。
-29. 不写“本段介绍”“视频中讲到”“需要注意”“应该确保”等讲解性表达。
-30. 每条 frame_query 长度控制在 20-80 个中文字符。
-31. visual_terms 是给开放词表检测/分割模型做图索引的元素表，输出 2-8 个英文开放词表名词，例如 servo、base、screw hole、wire、control board、screen；只写画面中应该被检测到的物体/部件/区域，不写动作、形容词或抽象目的。
-32. query_graph 是这一步真正用于匹配的图结构，必须只基于它来表达本条操作需要找什么样的画面，不要从 frame_query 或 visual_terms 反推图结构。
-视频名称：{video_title}
-文件名：{filename}
-视频时长：{duration}
-
-source_sentences:
-{clip_text(source_context, max_input_chars // 2)}
-
-输出 JSON：
-{{
-  "title": "视频名称",
-  "sections": [
-    {{
-      "index": 1,
-      "title": "语义段落标题",
-      "source_segment_indices": [0, 1],
-      "text": "整理后的正文",
-      "visual_operations": [
-        {{
-          "index": 1,
-          "operation_text": "润色后的关键操作步骤",
-          "source_segment_indices": [0],
-          "priority": "high",
-          "frame_query": "适合图索引匹配的关键业务帧画面描述",
-          "visual_terms": ["servo", "base"],
-          "query_graph": {{
-            "nodes": [
-              {{"id": "servo", "label": "servo", "role": "part", "required": true, "weight": 0.5}},
-              {{"id": "base", "label": "base", "role": "part", "required": true, "weight": 0.5}}
-            ],
-            "edges": [
-              {{"from": "servo", "relation": "near", "to": "base", "required": false, "weight": 1.0}}
-            ]
-          }}
-        }}
-      ]
-    }}
-  ]
-}}
-"""
-
-
-def build_transcript_structure_prompt(
-    *,
-    video_title: str,
-    filename: str,
-    duration: str,
-    source_segments: list[dict[str, Any]],
-    max_input_chars: int,
-    max_visual_operations_per_section: int,
-) -> str:
-    source_lines: list[str] = []
-    for segment in source_segments:
-        index = int(segment.get("index") or len(source_lines))
-        start_time = format_timestamp(float(segment.get("start_seconds") or 0.0))
-        end_time = format_timestamp(float(segment.get("end_seconds") or segment.get("start_seconds") or 0.0))
-        text = str(segment.get("text") or "").strip()
-        source_lines.append(f"[{index}] {start_time}-{end_time} {text}")
-
-    source_context = "\n".join(source_lines) if source_lines else "(empty)"
-    return f"""请把下面的 ASR 句子整理成结构化转写 JSON。
-
-硬性要求：
-1. 只能基于 source_sentences 里的原始句子重组，不要改写事实含义，不要补充 ASR 没说过的信息。
-2. 段落必须按原始句子顺序组织，source_segment_indices 只能来自对应段落里的句子。
-3. 每个段落都必须输出 visual_operations，里面只保留真正需要做关键帧检索的关键操作。
-4. 每个 visual_operation 必须输出 operation_text、source_segment_indices、frame_query、visual_terms、priority、query_graph。
-5. query_graph 是后续图匹配的唯一结构化输入，必须直接从你对该操作的理解生成，不要从 frame_query 或 visual_terms 反推。
-6. 不要输出兜底字段，不要留空 query_graph，不要把普通叙述句误当成关键操作。
-7. visual_terms 只保留图中需要检出的英文名词，建议直接使用 query_graph.nodes 里的可见对象节点 label。
-8. query_graph 至少包含 nodes 和 edges；如果该操作强调完成状态，可以额外输出 state。
-9. nodes 中每个节点必须包含 id、label、role、required、weight。
-10. edges 中每条边必须包含 from、relation、to、required、weight。
-11. required 用于表示这个节点或关系是否是该操作的必要证据。
-12. weight 用 0 到 1 的小数表示相对重要性，整组节点和边的权重不必强制和为 1，但请合理分配。
-13. 如果这个关键操作关注的是完成后状态，优先让 frame_query 描述清楚状态画面，而不是动作过程。
-14. 只写画面中能直接看见的内容，不写原因、目的、注意事项、规范、风险、抽象总结。
-15. 尽量把会遮挡主体的手部描述降为辅助证据，不要把手部当成主查询对象。
-
-视频名称：{video_title}
-文件名：{filename}
-视频时长：{duration}
-
-source_sentences:
-{clip_text(source_context, max_input_chars // 2)}
-
-输出 JSON：
-{{
-  "title": "{video_title}",
-  "sections": [
-    {{
-      "index": 1,
-      "title": "段落标题",
-      "source_segment_indices": [0, 1],
-      "text": "整理后的正文",
-      "visual_operations": [
-        {{
-          "index": 1,
-          "operation_text": "关键操作文本",
-          "source_segment_indices": [0],
-          "priority": "high",
-          "frame_query": "完成状态或关键清晰画面描述",
-          "visual_terms": ["servo", "base"],
-          "query_graph": {{
-            "nodes": [
-              {{"id": "servo", "label": "servo", "role": "part", "required": true, "weight": 0.5}},
-              {{"id": "base", "label": "base", "role": "part", "required": true, "weight": 0.5}}
-            ],
-            "edges": [
-              {{"from": "servo", "relation": "near", "to": "base", "required": false, "weight": 1.0}}
-            ]
-          }}
-        }}
-      ]
-    }}
-  ]
-}}
-"""
 
 
 class QwenTranscriptTreeGenerator:
@@ -399,6 +209,7 @@ class QwenTranscriptTreeGenerator:
         filename: str,
         duration: str,
         source_segments: list[dict[str, Any]],
+        retry_feedback: str = "",
     ) -> dict[str, Any]:
         prompt = build_transcript_structure_prompt(
             video_title=video_title,
@@ -406,7 +217,7 @@ class QwenTranscriptTreeGenerator:
             duration=duration,
             source_segments=source_segments,
             max_input_chars=self.max_input_chars,
-            max_visual_operations_per_section=settings.video_max_visual_operations_per_section,
+            retry_feedback=retry_feedback,
         )
         payload = {
             "model": self.model,
@@ -431,6 +242,7 @@ class QwenTranscriptTreeGenerator:
                 "endpoint": url,
                 "input_chars": len(prompt),
                 "max_tokens": self.max_tokens,
+                "validation_retry": bool(retry_feedback.strip()),
             },
         ) as (audit_session, call_id):
             with httpx.Client(timeout=self.timeout_seconds, trust_env=False) as client:
@@ -464,7 +276,7 @@ def build_transcript_structure_prompt(
     duration: str,
     source_segments: list[dict[str, Any]],
     max_input_chars: int,
-    max_visual_operations_per_section: int,
+    retry_feedback: str = "",
 ) -> str:
     source_lines: list[str] = []
     for segment in source_segments:
@@ -475,28 +287,43 @@ def build_transcript_structure_prompt(
         source_lines.append(f"[{index}] {start_time}-{end_time} {text}")
 
     source_context = "\n".join(source_lines) if source_lines else "(empty)"
+    retry_context = ""
+    if retry_feedback.strip():
+        retry_context = f"""
+
+上一次输出没有通过后端结构校验，请根据下面的错误重新生成完整 JSON，不要只返回修复片段：
+{clip_text(retry_feedback.strip(), max_input_chars // 4)}
+
+重试修正要求：
+- 所有 query_graph.edges 里的 from/to 必须引用同一 query_graph.nodes 中已经存在的 node.id。
+- 如果一条关系对应的节点没有出现在 nodes 中，必须先补齐节点，或者删除这条关系。
+- business_frame_text 仍然必须保持单张关键帧 query，不要因为重试又写成完整动作流程。
+"""
     return f"""请把下面的 ASR 句子整理成结构化转写 JSON。
 
 硬性要求：
 1. 只能基于 source_sentences 里的原始句子重组，不要改写事实含义，不要补充 ASR 没说过的信息。
 2. section.source_segment_indices 必须是连续区间，不能跳号，不能拆散后再拼。
 3. 如果一个段落需要引用多个 ASR 句子，这些句子必须是原始序列里相邻的连续句子，比如 [3]、[3,4]、[3,4,5]；不允许 [3,5]、[2,4,5]、[6,8] 这种非连续索引。
-4. 每个段落都必须输出 visual_operations，里面只保留真正需要做关键帧检索的关键操作。
-5. 每个 visual_operation 必须输出 operation_text、source_segment_indices、frame_query、visual_terms、priority、query_graph。
-6. visual_operation.source_segment_indices 也必须是连续区间，且只能取自该段落的 source_segment_indices；如果一条操作需要跨越不连续句子，请拆成多个 visual_operations，或者只保留最直接描述这一步的连续句子区间，不要补洞。
-7. visual_operation.source_segment_indices 不能重复使用同一 ASR 句子索引，也不要把一个句子拆到两个关键操作里。
-8. query_graph 是后续图匹配的唯一结构化输入，必须直接从你对该操作的理解生成，不要从 frame_query 或 visual_terms 反推。
-9. 不要输出兜底字段，不要留空 query_graph，不要把普通叙述句误当成关键操作。
-10. visual_terms 只保留图中需要检出的英文名词，建议直接使用 query_graph.nodes 里的可见对象节点 label。
-11. query_graph 至少包含 nodes 和 edges；如果该操作强调完成状态，可以额外输出 state，不需要时就不要输出 state 字段。
-12. 如果输出 state，必须写成对象，且 state.weight 必须是 0 到 1 之间的数字，不要写成 high / medium / low，也不要写成字符串。
-13. nodes 中每个节点必须包含 id、label、role、required、weight。
-14. edges 中每条边必须包含 from、relation、to、required、weight。
-15. required 用于表示这个节点或关系是否是该操作的必要证据。
-16. weight 用 0 到 1 的小数表示相对重要性，整组节点和边的权重不必强制和为 1，但请合理分配。
-17. 如果这个关键操作关注的是完成后状态，优先让 frame_query 描述清楚状态画面，而不是动作过程。
-18. 只写画面中能直接看见的内容，不写原因、目的、注意事项、规范、风险、抽象总结。
-19. 尽量把会遮挡主体的手部描述降为辅助证据，不要把手部当成主查询对象。
+4. 段落粒度必须是“完整业务步骤”，不要按每颗螺丝、每个孔位、每次拿取、每次对齐这样的微动作拆段。
+5. 机械臂装配视频的典型段落粒度是：机械臂组件介绍、组装底座与大臂、组装大臂与小臂、组装手腕关节与小臂、组装夹爪、接线或测试等大的操作步骤。
+6. 同一个完整步骤里的连续说明、多个螺丝固定、对齐提醒、完成检查，应尽量合并在同一段里；只有操作对象或装配阶段明显切换时才拆新段。
+7. 不要输出 text、source_text 或任何原文字段；text 正文由系统根据 source_segment_indices 从 ASR 原句拼接生成。
+8. 每个段落必须输出 polished_text，作为给人阅读的润色后正文。polished_text 要保留原文事实和顺序，把口语表达、重复语气词、断句不顺、口语数字润色成清晰自然的教程正文，不要新增 ASR 没说过的信息。
+9. 每个段落必须输出 business_frame_text，作为待匹配文本，专门用于图索引和图文匹配。
+10. business_frame_text 必须是适合匹配单张关键帧的核心画面描述，而不是本段完整操作流程的复述。
+11. business_frame_text 优先描述一张图里稳定可见的对象、对象关系和完成/安装状态，例如“大臂与底座连接”“舵机靠近底座金属固定件”“线缆已插入端子”。
+12. business_frame_text 不要枚举连续动作、先后顺序或每颗螺丝的安装过程；不要写“依次拧紧四个螺丝”“活动一下检查”等跨时间动作，只保留最能代表该业务步骤的一张关键帧画面。
+13. business_frame_text 不要写教程语气、原因、目的、注意事项、风险解释或抽象总结；只写画面中可见对象、关系和状态，长度控制在 30-100 个中文字符。
+14. 每个段落必须直接输出 section.query_graph；不要输出 visual_operations、key_operations、frame_query、frame_queries、visual_terms、operation_text。
+15. query_graph 是后续图索引和图文匹配的唯一结构化输入，必须围绕 business_frame_text 这张核心关键帧画面生成，不要覆盖本段所有微动作。
+16. query_graph 至少包含 nodes 和 edges，不要留空 query_graph。
+17. nodes 中每个节点必须包含 id、label、role、required、weight。
+18. edges 中每条边必须包含 from、relation、to、required、weight。
+19. required 用于表示这个节点或关系是否是该段业务步骤核心关键帧的必要证据。
+20. weight 用 0 到 1 的小数表示相对重要性，整组节点和边的权重不必强制和为 1，但请合理分配。
+21. 不要输出 query_graph.state；完成状态、安装状态、连接状态应通过 business_frame_text 以及 nodes / edges 表达。
+22. 只有当手部或工具动作是判断该业务步骤的必要证据时，才把手部或工具放进 query_graph；主体必须仍然是设备、部件、孔位、连接位置或完成状态。
 
 视频名称：{video_title}
 文件名：{filename}
@@ -504,6 +331,7 @@ def build_transcript_structure_prompt(
 
 source_sentences:
 {clip_text(source_context, max_input_chars // 2)}
+{retry_context}
 
 输出 JSON：
 {{
@@ -513,26 +341,17 @@ source_sentences:
       "index": 1,
       "title": "段落标题",
       "source_segment_indices": [0, 1],
-      "text": "整理后的正文",
-      "visual_operations": [
-        {{
-          "index": 1,
-          "operation_text": "关键操作文本",
-          "source_segment_indices": [0],
-          "priority": "high",
-          "frame_query": "完成状态或关键清晰画面描述",
-          "visual_terms": ["servo", "base"],
-          "query_graph": {{
-            "nodes": [
-              {{"id": "servo", "label": "servo", "role": "part", "required": true, "weight": 0.5}},
-              {{"id": "base", "label": "base", "role": "part", "required": true, "weight": 0.5}}
-            ],
-            "edges": [
-              {{"from": "servo", "relation": "near", "to": "base", "required": false, "weight": 1.0}}
-            ]
-          }}
-        }}
-      ]
+      "polished_text": "润色后的本段教程正文",
+      "business_frame_text": "画面中舵机靠近底座金属固定件，大臂与底座处于连接安装位置",
+      "query_graph": {{
+        "nodes": [
+          {{"id": "servo", "label": "servo", "role": "part", "required": true, "weight": 0.5}},
+          {{"id": "base", "label": "base", "role": "part", "required": true, "weight": 0.5}}
+        ],
+        "edges": [
+          {{"from": "servo", "relation": "near", "to": "base", "required": false, "weight": 1.0}}
+        ]
+      }}
     }}
   ]
 }}
@@ -565,12 +384,12 @@ def normalize_transcript_tree(
         if not isinstance(raw_section, dict):
             continue
         section_title = str(raw_section.get("title") or f"语义段落 {index}").strip()
-        text = str(raw_section.get("text") or "").strip()
+        model_text = str(raw_section.get("text") or "").strip()
         source_indices = normalize_source_indices(raw_section.get("source_segment_indices") or raw_section.get("source_chunks"))
         source_indices = sorted(source_indices)
         section_context = (
             f"section_position={index}, raw_section_index={raw_section.get('index')!r}, "
-            f"section_title={section_title!r}, source_segment_indices={source_indices}, text={text[:160]!r}"
+            f"section_title={section_title!r}, source_segment_indices={source_indices}, text={model_text[:160]!r}"
         )
         if not source_indices:
             raise RuntimeError(f"Qwen transcript structuring must return source_segment_indices: {section_context}")
@@ -590,20 +409,28 @@ def normalize_transcript_tree(
         assigned_source_indices.update(source_indices)
         start = clamp_seconds(start, duration_seconds)
         end = clamp_seconds(max(end, start), duration_seconds)
-        visual_operations = normalize_visual_operations(
-            raw_section.get("visual_operations") or raw_section.get("key_operations") or [],
-            source_segments=source_segments,
-            section_source_indices=source_indices,
+        asr_text = asr_text_from_segments(source_segments, source_indices)
+        polished_text = re.sub(
+            r"\s+",
+            " ",
+            str(raw_section.get("polished_text") or "").strip(),
+        ).strip()
+        if not polished_text:
+            raise RuntimeError(f"Qwen transcript structuring must return polished_text: {section_context}")
+        business_frame_text = re.sub(
+            r"\s+",
+            " ",
+            str(raw_section.get("business_frame_text") or "").strip(),
+        ).strip()
+        if not business_frame_text:
+            raise RuntimeError(f"Qwen transcript structuring must return business_frame_text: {section_context}")
+        query_graph = normalize_section_query_graph(
+            raw_section,
             section_index=index,
             section_title=section_title,
-            duration_seconds=duration_seconds,
-            max_operations=settings.video_max_visual_operations_per_section,
+            source_indices=source_indices,
+            business_frame_text=business_frame_text,
         )
-        frame_queries = [
-            operation["frame_query"]
-            for operation in visual_operations
-            if str(operation.get("frame_query") or "").strip()
-        ]
         sections.append(
             {
                 "index": len(sections) + 1,
@@ -612,10 +439,10 @@ def normalize_transcript_tree(
                 "end_seconds": round(end, 3),
                 "start_time": format_timestamp(start),
                 "end_time": format_timestamp(end),
-                "text": text,
-                "frame_queries": frame_queries,
-                "frame_queries_source": "visual_operations",
-                "visual_operations": visual_operations,
+                "text": asr_text,
+                "polished_text": polished_text,
+                "business_frame_text": business_frame_text,
+                "query_graph": query_graph,
                 "source_chunks": source_indices or matching_source_chunks(source_segments, start, end),
             }
         )
@@ -668,6 +495,9 @@ def render_transcript_tree_text(tree: dict[str, Any]) -> str:
     title = body.get("title") or video.get("title") or "视频转写"
     lines = [f"# {title}", ""]
     for section in body.get("sections") or []:
+        text = str(section.get("text") or "").strip()
+        polished_text = str(section.get("polished_text") or "").strip()
+        business_frame_text = transcript_section_business_frame_text(section)
         lines.extend(
             [
                 f"## {section.get('index')}. {section.get('title')}",
@@ -676,233 +506,43 @@ def render_transcript_tree_text(tree: dict[str, Any]) -> str:
                 "",
                 "### 正文",
                 "",
-                str(section.get("text") or "").strip() or "未识别。",
+                text or "未识别。",
+                "",
+                "### 润色后正文",
+                "",
+                polished_text or "未识别。",
+                "",
+                "### 待匹配文本",
+                "",
+                business_frame_text or "未识别。",
                 "",
             ]
         )
-        visual_operations = section.get("visual_operations") if isinstance(section.get("visual_operations"), list) else []
-        if visual_operations:
-            lines.extend(["### 关键操作", ""])
-            for operation in visual_operations:
-                lines.append(
-                    f"- {operation.get('index')}. {operation.get('operation_text') or operation.get('frame_query') or '关键操作'}"
-                )
-                if operation.get("start_time") and operation.get("end_time"):
-                    lines.append(f"  - 时间范围：{operation.get('start_time')} - {operation.get('end_time')}")
-                if operation.get("frame_query"):
-                    lines.append(f"  - frame_query：{operation.get('frame_query')}")
-            lines.append("")
         lines.append("")
     return "\n".join(lines).strip() + "\n"
 
 
-def normalize_visual_operations(
-    value: Any,
+def transcript_section_business_frame_text(section: dict[str, Any]) -> str:
+    return str(section.get("business_frame_text") or "").strip()
+
+
+def normalize_section_query_graph(
+    raw_section: dict[str, Any],
     *,
-    source_segments: list[dict[str, Any]],
-    section_source_indices: list[int],
     section_index: int,
     section_title: str,
-    duration_seconds: float,
-    max_operations: int,
-) -> list[dict[str, Any]]:
-    if max_operations <= 0:
-        return []
-    raw_items = value if isinstance(value, list) else []
-    section_index_set = set(section_source_indices)
-    assigned_indices: set[int] = set()
-    operations: list[dict[str, Any]] = []
-    last_source_index = -1
-
-    for raw_item in raw_items:
-        if len(operations) >= max_operations:
-            break
-        if not isinstance(raw_item, dict):
-            continue
-        source_indices = normalize_source_indices(raw_item.get("source_segment_indices") or raw_item.get("source_chunks"))
-        source_indices = sorted(source_indices)
-        operation_position = len(operations) + 1
-        raw_operation_index = raw_item.get("index")
-        operation_text = re.sub(
-            r"\s+",
-            " ",
-            str(raw_item.get("operation_text") or raw_item.get("text") or raw_item.get("title") or "").strip(),
-        ).strip()
-        frame_query = re.sub(r"\s+", " ", str(raw_item.get("frame_query") or "").strip()).strip()
-        operation_context = (
-            f"section_index={section_index}, section_title={section_title!r}, operation_position={operation_position}, "
-            f"raw_operation_index={raw_operation_index!r}, source_segment_indices={source_indices}, "
-            f"section_source_indices={section_source_indices}, operation_text={operation_text[:160]!r}, "
-            f"frame_query={frame_query[:160]!r}"
-        )
-        if not source_indices:
-            raise RuntimeError(f"Qwen visual operation must return source_segment_indices: {operation_context}")
-        if not source_indices_are_contiguous(source_indices):
-            raise RuntimeError(
-                "Qwen visual operation source_segment_indices must be contiguous: "
-                f"{operation_context}; expected a single continuous interval such as [3], [3,4], [3,4,5]"
-            )
-        if any(source_index not in section_index_set for source_index in source_indices):
-            raise RuntimeError(
-                "Qwen visual operation source_segment_indices must belong to its transcript section: "
-                f"{operation_context}"
-            )
-        if any(source_index in assigned_indices for source_index in source_indices):
-            raise RuntimeError(
-                "Qwen visual operation reused an ASR sentence index: "
-                f"{operation_context}; already_assigned_indices={sorted(assigned_indices)}"
-            )
-        if source_indices[0] <= last_source_index:
-            raise RuntimeError(
-                "Qwen visual operations must be ordered by ASR sentence index: "
-                f"{operation_context}; last_source_index={last_source_index}"
-            )
-
-        start, end = section_range_from_source_segments(source_segments, source_indices)
-        if start is None or end is None:
-            raise RuntimeError(f"ASR sentence timestamps are missing for one or more visual operations: {operation_context}")
-        start = clamp_seconds(start, duration_seconds)
-        end = clamp_seconds(max(end, start), duration_seconds)
-        if not frame_query:
-            raise RuntimeError(f"Qwen visual operation must return frame_query: {operation_context}")
-        priority = str(raw_item.get("priority") or "medium").strip().lower()
-        if priority not in {"high", "medium", "low"}:
-            priority = "medium"
-        try:
-            query_graph = normalize_query_graph(raw_item.get("query_graph"))
-        except QueryGraphError as exc:
-            raise RuntimeError(f"{exc}: {operation_context}") from exc
-        visual_terms = query_graph_prompt_terms(query_graph)
-
-        assigned_indices.update(source_indices)
-        last_source_index = source_indices[-1]
-        operations.append(
-            {
-                "index": len(operations) + 1,
-                "operation_text": (operation_text or frame_query)[:160],
-                "source_segment_indices": source_indices,
-                "priority": priority,
-                "frame_query": frame_query[:160],
-                "visual_terms": visual_terms,
-                "query_graph": query_graph,
-                "start_seconds": round(start, 3),
-                "end_seconds": round(end, 3),
-                "start_time": format_timestamp(start),
-                "end_time": format_timestamp(end),
-            }
-        )
-
-    return operations
-
-
-VISUAL_TERM_SYNONYMS = {
-    "手部": "hand",
-    "手": "hand",
-    "工具": "tool",
-    "螺丝刀": "screwdriver",
-    "十字螺丝刀": "screwdriver",
-    "六角螺丝刀": "screwdriver",
-    "舵机": "servo",
-    "底座": "base",
-    "大臂": "arm",
-    "小臂": "arm",
-    "机械臂": "arm",
-    "线": "wire",
-    "电线": "wire",
-    "控制板": "control board",
-    "屏幕": "screen",
-    "孔位": "screw hole",
-    "螺丝孔": "screw hole",
-    "螺丝": "screw",
-    "抓手": "gripper",
-    "夹手": "gripper",
-    "手腕": "wrist joint",
-    "腕关节": "wrist joint",
-    "夹爪": "gripper",
-    "正极": "positive terminal",
-    "负极": "negative terminal",
-    "信号": "signal",
-}
-
-
-def normalize_visual_terms(value: Any, *, frame_query: str, operation_text: str) -> list[str]:
-    raw_items = value if isinstance(value, list) else [value]
-    terms: list[str] = []
-    for item in raw_items:
-        if isinstance(item, dict):
-            item = item.get("label") or item.get("term") or item.get("name")
-        term = re.sub(r"\s+", " ", str(item or "")).strip().lower()
-        if not term:
-            continue
-        term = VISUAL_TERM_SYNONYMS.get(term) or VISUAL_TERM_SYNONYMS.get(term.strip()) or term
-        term = re.sub(r"[^0-9a-z\u4e00-\u9fff]+", " ", str(term)).strip()
-        term = " ".join(term.split())
-        if term:
-            terms.append(term)
-
-    if terms:
-        return list(dict.fromkeys(terms))
-
-    fallback_text = f"{frame_query} {operation_text}".strip()
-    fallback_terms: list[str] = []
-    for token in re.split(r"[\s,，。.!?；;:：、/\\()（）\[\]【】\"'“”‘’]+", fallback_text):
-        token = token.strip().lower()
-        if not token:
-            continue
-        mapped = VISUAL_TERM_SYNONYMS.get(token) or token
-        mapped = re.sub(r"[^0-9a-z\u4e00-\u9fff]+", " ", str(mapped)).strip()
-        mapped = " ".join(mapped.split())
-        if mapped:
-            fallback_terms.append(mapped)
-    return list(dict.fromkeys(fallback_terms[:8]))
-
-
-def normalize_visual_terms(value: Any, *, frame_query: str, operation_text: str) -> list[str]:
-    raw_items = value if isinstance(value, list) else [value]
-    terms: list[str] = []
-    for item in raw_items:
-        if isinstance(item, dict):
-            item = item.get("label") or item.get("term") or item.get("name")
-        term = re.sub(r"\s+", " ", str(item or "")).strip().lower()
-        if not term:
-            continue
-        term = VISUAL_TERM_SYNONYMS.get(term) or VISUAL_TERM_SYNONYMS.get(term.strip()) or term
-        term = re.sub(r"[^0-9a-z\u4e00-\u9fff]+", " ", str(term)).strip()
-        term = " ".join(term.split())
-        if term:
-            terms.append(term)
-    return list(dict.fromkeys(terms))
-
-
-def normalize_frame_queries(value: Any, *, section_title: str, text: str) -> list[str]:
-    raw_items = value if isinstance(value, list) else [value]
-    queries: list[str] = []
-    seen: set[str] = set()
-    for item in raw_items:
-        query = re.sub(r"\s+", " ", str(item or "")).strip()
-        if not query or query in seen:
-            continue
-        queries.append(query[:160])
-        seen.add(query)
-        if len(queries) >= 3:
-            break
-
-    if queries:
-        return queries
-
-    fallback = re.sub(r"\s+", " ", "，".join(item for item in [section_title, text] if item)).strip()
-    return [fallback[:160]] if fallback else []
-
-
-def infer_frame_queries_source(value: Any, *, frame_queries: list[str], section_title: str, text: str) -> str:
-    raw_items = value if isinstance(value, list) else [value]
-    has_raw_query = any(str(item or "").strip() for item in raw_items)
-    fallback = re.sub(r"\s+", " ", "，".join(item for item in [section_title, text] if item)).strip()[:160]
-    if not has_raw_query:
-        return "fallback_title_text"
-    if fallback and len(frame_queries) == 1 and frame_queries[0] == fallback:
-        return "fallback_title_text"
-    return "model"
+    source_indices: list[int],
+    business_frame_text: str,
+) -> dict[str, Any]:
+    raw_graph = raw_section.get("query_graph")
+    context = (
+        f"section_index={section_index}, section_title={section_title!r}, "
+        f"source_segment_indices={source_indices}, business_frame_text={business_frame_text[:160]!r}"
+    )
+    try:
+        return normalize_query_graph(raw_graph)
+    except QueryGraphError as exc:
+        raise RuntimeError(f"{exc}: {context}") from exc
 
 
 def attach_media_to_transcript_tree(
@@ -959,6 +599,9 @@ def build_markdown_from_transcript_tree(*, tree: dict[str, Any], source_video_ob
     for section in body.get("sections") or []:
         frames = section.get("frames") or []
         section_wireframes = section.get("wireframes") or wireframes_from_frames(frames)
+        text = str(section.get("text") or "").strip()
+        polished_text = str(section.get("polished_text") or "").strip()
+        business_frame_text = transcript_section_business_frame_text(section)
         lines.extend(
             [
                 f"## {section.get('index')}. {section.get('title')}",
@@ -967,7 +610,15 @@ def build_markdown_from_transcript_tree(*, tree: dict[str, Any], source_video_ob
                 "",
                 "### 正文",
                 "",
-                str(section.get("text") or "").strip() or "未识别。",
+                text or "未识别。",
+                "",
+                "### 润色后正文",
+                "",
+                polished_text or "未识别。",
+                "",
+                "### 待匹配文本",
+                "",
+                business_frame_text or "未识别。",
                 "",
                 "### 关键帧",
                 "",
@@ -1125,6 +776,18 @@ def section_range_from_source_segments(source_segments: list[dict[str, Any]], in
     return start, end
 
 
+def asr_text_from_segments(source_segments: list[dict[str, Any]], indices: list[int]) -> str:
+    if not source_segments or not indices:
+        return ""
+    by_index = {int(segment.get("index") or 0): segment for segment in source_segments}
+    parts = [
+        re.sub(r"\s+", " ", str(by_index[index].get("text") or "").strip())
+        for index in indices
+        if index in by_index and str(by_index[index].get("text") or "").strip()
+    ]
+    return " ".join(parts).strip()
+
+
 def ensure_segment_ranges(segments: list[dict[str, Any]], *, duration_ms: int) -> list[dict[str, Any]]:
     duration_seconds = round(duration_ms / 1000, 3) if duration_ms else 0.0
     normalized = []
@@ -1260,5 +923,3 @@ def clip_text(text: str, max_chars: int) -> str:
 
 def yaml_escape(value: str) -> str:
     return value.replace("\\", "\\\\").replace('"', '\\"')
-
-

@@ -2,10 +2,15 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import asdict
+from dataclasses import asdict, is_dataclass
 from datetime import datetime, timezone
+from typing import Any
 
 from app.core.config import Settings, settings
+from app.services.standard_library_sacinfo_update import (
+    SacinfoUpdateOptions,
+    standard_library_sacinfo_update_service,
+)
 from app.services.standard_update import NationalUpdateOptions, standard_update_service
 
 
@@ -56,11 +61,39 @@ class StandardUpdateScheduler:
                 logger.exception("standard update scheduler cycle failed: %s", exc)
                 self._emit(f"standard update scheduler cycle failed: {exc}")
                 return
-            self._emit(f"standard update scheduler cycle summary={asdict(summary)}")
+            self._emit(f"standard update scheduler cycle summary={self._summary_payload(summary)}")
 
-    def _run_update_once(self):
-        options = NationalUpdateOptions.from_settings()
-        return standard_update_service.run_national_update(options)
+    def _run_update_once(self) -> dict[str, Any]:
+        cycle: dict[str, Any] = {
+            "status": "completed",
+            "national": None,
+            "industry": None,
+            "local": None,
+        }
+        if self.settings.standard_update_national_enabled:
+            national_options = NationalUpdateOptions.from_settings()
+            cycle["national"] = asdict(standard_update_service.run_national_update(national_options))
+        else:
+            cycle["national"] = {"status": "disabled"}
+
+        for source in ("industry", "local"):
+            enabled = (
+                self.settings.standard_update_industry_enabled
+                if source == "industry"
+                else self.settings.standard_update_local_enabled
+            )
+            if not enabled:
+                cycle[source] = {"status": "disabled"}
+                continue
+            options = SacinfoUpdateOptions.from_settings(source, self.settings)
+            cycle[source] = standard_library_sacinfo_update_service.run_source_update(options)
+
+        statuses = [value.get("status") for value in cycle.values() if isinstance(value, dict)]
+        if any(status in {"failed", "completed_with_failures"} for status in statuses):
+            cycle["status"] = "completed_with_failures"
+        if all(status == "disabled" for status in statuses):
+            cycle["status"] = "disabled"
+        return cycle
 
     async def _sleep(self, seconds: float) -> None:
         if seconds <= 0:
@@ -73,3 +106,8 @@ class StandardUpdateScheduler:
     def _emit(self, message: str) -> None:
         logger.info(message)
         print(message, flush=True)
+
+    def _summary_payload(self, summary: Any) -> Any:
+        if is_dataclass(summary):
+            return asdict(summary)
+        return summary

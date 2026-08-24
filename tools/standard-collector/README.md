@@ -1,4 +1,4 @@
-# Standard Collector
+﻿# Standard Collector
 
 `tools/standard-collector/scripts/collect_national_pdfs.py` 是独立的历史 PDF 采集脚本。
 
@@ -7,11 +7,15 @@
 - 读取项目根目录 `.env`
 - 发现国家标准列表
 - 下载 PDF
-- 上传到 `servforce-standards`
-- 写入 `standards`
-- 写入 `standard_sync_jobs`
-- 写入 `standard_sync_items`
+- 上传到 `STANDARD_LIBRARY_OBJECT_STORE_BUCKET`，默认 `octopus-standard-library`
+- 写入新标准库 `STANDARD_LIBRARY_DATABASE_URL` 指向的数据库，默认 `octopus_standard_library`
+- 写入新库 `standards`
+- 写入新库 `standard_sync_jobs`
+- 写入新库 `standard_sync_items`
+- 为可下载 PDF 创建新库 `standard_processing_jobs(job_type='materialize', status='pending')`
 - 自动跳过已经入库的标准
+
+注意：历史采集不再写旧业务库里的 `app.models.entities.Standard`。后续解析、索引、Atlas 也必须使用新标准库脚本 `process_standard_library_jobs.py`，不要再使用旧脚本 `materialize_and_index_standards.py` 处理这批数据。
 
 `--resume` 已经不再需要了，脚本默认就是断点续跑式的行为。
 
@@ -36,7 +40,7 @@
 - `OPENSTD_DOWNLOAD_TIMEOUT_SECONDS`
 - `OPENSTD_IMPORTER_TOOL_DIR`
 - `STANDARD_WORKDIR`
-- `OBJECT_STORE_STANDARD_BUCKET`
+- `STANDARD_LIBRARY_OBJECT_STORE_BUCKET`
 
 ## 二、标准分类字段规范
 
@@ -277,20 +281,24 @@ python tools/standard-collector/scripts/backfill_standard_effective_dates.py
 
 ## 9. 材料化和索引脚本
 
-`tools/standard-collector/scripts/materialize_and_index_standards.py` 是历史标准的第二阶段处理脚本。
+`tools/standard-collector/scripts/process_standard_library_jobs.py` 是新标准库历史标准的第二阶段处理脚本。
 
 它不会重新爬官网，也不会下载新的 PDF。它只消费 `standards` 主表里已经有 PDF 的标准：
 
 ```text
 standards.source_pdf_object_key != ''
+standard_processing_jobs.job_type = 'materialize'
+standard_processing_jobs.status = 'pending'
 ```
 
 处理流程是：
 
 ```text
-从 standards 抢一条已下载 PDF 的标准
--> 调现有材料化能力生成 4 个 markdown
--> 上传 markdown 到 MinIO
+从 standard_processing_jobs 抢一条 materialize pending 任务
+-> 读取新库 standards.source_pdf_object_key
+-> 调材料化能力生成 4 个 markdown
+-> 上传 markdown 到 STANDARD_LIBRARY_OBJECT_STORE_BUCKET
+-> 创建 index pending 任务
 -> 用 overview markdown 建 embedding 索引
 -> 写 standard_indexes
 -> 更新 standards.materialize_status / standards.index_status
@@ -305,7 +313,7 @@ python tools/standard-collector/scripts/collect_national_pdfs.py
 另开一个终端运行材料化和索引脚本：
 
 ```powershell
-python tools/standard-collector/scripts/materialize_and_index_standards.py --watch
+python tools/standard-collector/scripts/process_standard_library_jobs.py --watch
 ```
 
 这样下载脚本会持续把新 PDF 写入 `standards`，材料化索引脚本会持续消费已经写入 `standards` 的记录。
@@ -318,120 +326,122 @@ python tools/standard-collector/scripts/materialize_and_index_standards.py --wat
   - `--watch` 模式下没有任务时等待多少秒，默认 `60`。
 - `--limit`
   - 最多处理多少条标准，`0` 表示不限制。小批量测试时建议使用。
-- `--retry-failed`
-  - 是否重试失败状态。默认不重试 `failed`，避免坏 PDF 或错误配置反复消耗模型/API。
 - `--materialize-only`
   - 只生成 4 个 markdown，不建立 embedding 索引。
 - `--index-only`
   - 只给已经材料化完成的标准建立索引。
+- `--atlas`
+  - 材料化和索引处理完后，额外生成一次 Atlas 投影。
+- `--atlas-only`
+  - 只生成一次 Atlas 投影，不消费材料化和索引任务。
 - `--log-file`
   - 日志文件路径。默认写入：
 
 ```text
-tools/standard-collector/logs/materialize_and_index_standards.log
+tools/standard-collector/logs/process_standard_library_jobs.log
 ```
 
 ### 9.2 默认候选规则
 
-默认完整模式会优先处理还没材料化的标准：
+脚本不再按旧库的状态字段直接扫描标准，而是消费新库 `standard_processing_jobs` 里的待处理任务。
+
+历史采集下载 PDF 成功后会创建：
 
 ```text
-source_pdf_object_key != ''
-materialize_status = 'not_started'
+job_type = materialize
+status = pending
 ```
 
-处理动作：
+材料化成功后会自动创建：
 
 ```text
-materialize -> index
+job_type = index
+status = pending
 ```
 
-如果没有待材料化标准，并且没有使用 `--materialize-only`，脚本会继续处理已经材料化但还没索引的标准：
+默认完整模式会按这个顺序消费：
 
 ```text
-materialize_status = 'materialized'
-index_status = 'not_indexed'
+materialize pending job
+-> 生成 overview / structure / logic / body 4 个 markdown
+-> 写入 MinIO bucket: STANDARD_LIBRARY_OBJECT_STORE_BUCKET
+-> materialize_status = materialized
+-> 创建 index pending job
+-> 读取 overview markdown
+-> 写入 standard_indexes
+-> index_status = indexed
 ```
 
-处理动作：
+如果传入 `--materialize-only`，脚本只消费材料化任务，不消费索引任务。
 
-```text
-index
-```
+如果传入 `--index-only`，脚本只消费已经排好的索引任务。
 
 ### 9.3 失败重试规则
 
-默认不处理失败项：
+失败任务会保留在 `standard_processing_jobs` 中：
 
 ```text
-materialize_status = 'failed'
-index_status = 'failed'
+status = failed
+stage = failed
 ```
 
-只有显式传入 `--retry-failed` 时才会重试。
-
-带 `--retry-failed` 后，材料化候选包括：
+对应标准的相关状态也会更新为失败，例如：
 
 ```text
-materialize_status in ('not_started', 'failed')
+materialize_status = failed
+index_status = failed
 ```
 
-`length_error` 不会被 `--retry-failed` 自动重试；需要先调大长度配置或后续支持分块，再单独处理这类记录。
-
-索引候选包括：
-
-```text
-index_status in ('not_indexed', 'failed')
-```
+当前脚本只消费 `pending` 任务，不会自动反复重试 `failed`，避免坏 PDF 或错误配置反复消耗模型/API。修复配置或数据后，需要重新排一个材料化/索引任务再处理。
 
 ### 9.4 常用命令组合
 
 先小批量完整测试 1 条：
 
 ```powershell
-python tools/standard-collector/scripts/materialize_and_index_standards.py --limit 1
+python tools/standard-collector/scripts/process_standard_library_jobs.py --limit 1
 ```
 
 再测试 3 条：
 
 ```powershell
-python tools/standard-collector/scripts/materialize_and_index_standards.py --limit 3
+python tools/standard-collector/scripts/process_standard_library_jobs.py --limit 3
 ```
 
 下载脚本运行期间，持续处理已经下载好的标准：
 
 ```powershell
-python tools/standard-collector/scripts/materialize_and_index_standards.py --watch
+python tools/standard-collector/scripts/process_standard_library_jobs.py --watch
 ```
 
 没有任务时每 30 秒检查一次：
 
 ```powershell
-python tools/standard-collector/scripts/materialize_and_index_standards.py --watch --sleep-seconds 30
+python tools/standard-collector/scripts/process_standard_library_jobs.py --watch --sleep-seconds 30
 ```
 
 只生成 markdown，暂时不建索引：
 
 ```powershell
-python tools/standard-collector/scripts/materialize_and_index_standards.py --materialize-only --watch
+python tools/standard-collector/scripts/process_standard_library_jobs.py --materialize-only --watch
 ```
 
 后续只补索引：
 
 ```powershell
-python tools/standard-collector/scripts/materialize_and_index_standards.py --index-only --watch
+python tools/standard-collector/scripts/process_standard_library_jobs.py --index-only --watch
 ```
 
-重试失败项，先限制 20 条：
+继续处理待处理项，先限制 20 条：
 
 ```powershell
-python tools/standard-collector/scripts/materialize_and_index_standards.py --retry-failed --limit 20
+python tools/standard-collector/scripts/process_standard_library_jobs.py --limit 20
 ```
 
-只重试索引失败项：
+只处理已经排队的索引任务：
 
 ```powershell
-python tools/standard-collector/scripts/materialize_and_index_standards.py --index-only --retry-failed --limit 20
+python tools/standard-collector/scripts/process_standard_library_jobs.py --index-only --limit 20
 ```
 
 ### 9.5 运行前需要确认的配置
@@ -439,7 +449,7 @@ python tools/standard-collector/scripts/materialize_and_index_standards.py --ind
 材料化阶段需要：
 
 ```text
-OBJECT_STORE_STANDARD_BUCKET
+STANDARD_LIBRARY_OBJECT_STORE_BUCKET
 OBJECT_STORE_ENDPOINT
 OBJECT_STORE_ACCESS_KEY
 OBJECT_STORE_SECRET_KEY
@@ -458,7 +468,7 @@ STANDARD_WORKDIR
 索引阶段还需要：
 
 ```text
-DATABASE_URL 使用 PostgreSQL
+STANDARD_LIBRARY_DATABASE_URL 使用 PostgreSQL
 PostgreSQL 已启用 pgvector
 STANDARD_EMBEDDING_API_KEY
 STANDARD_EMBEDDING_BASE_URL
@@ -470,7 +480,7 @@ STANDARD_EMBEDDING_TIMEOUT_SECONDS
 如果只想先生成 markdown，不建索引，可以使用：
 
 ```powershell
-python tools/standard-collector/scripts/materialize_and_index_standards.py --materialize-only --watch
+python tools/standard-collector/scripts/process_standard_library_jobs.py --materialize-only --watch
 ```
 
 ### 9.6 状态流转
@@ -478,14 +488,18 @@ python tools/standard-collector/scripts/materialize_and_index_standards.py --mat
 材料化成功：
 
 ```text
-materialize_status: not_started -> processing -> materialized
-index_status: not_indexed
+standard_processing_jobs.job_type = materialize
+standard_processing_jobs.status: pending -> running -> completed
+standards.materialize_status: pending -> materializing -> materialized
+standards.index_status: pending
 ```
 
 索引成功：
 
 ```text
-index_status: not_indexed -> indexing -> indexed
+standard_processing_jobs.job_type = index
+standard_processing_jobs.status: pending -> running -> completed
+standards.index_status: pending -> indexing -> indexed
 ```
 
 材料化失败：
@@ -493,13 +507,6 @@ index_status: not_indexed -> indexing -> indexed
 ```text
 materialize_status = failed
 materialize_error = 错误信息
-```
-
-材料化长度问题：
-
-```text
-materialize_status = length_error
-materialize_error = 具体是哪一个 markdown 输入超限，或者哪一个 markdown 输出被 max_tokens 截断
 ```
 
 索引失败：
@@ -510,7 +517,7 @@ index_status = failed
 index_error = 错误信息
 ```
 
-脚本抢到任务后会先把状态改成 `processing` 或 `indexing`，再开始慢任务处理，用来避免重复处理同一条标准。
+脚本抢到任务后会先把任务状态改成 `running`，同时把标准加工状态改成 `materializing` 或 `indexing`，再开始慢任务处理，用来避免重复处理同一条标准。
 
 ## 10. 国家标准周期更新脚本
 
@@ -537,6 +544,19 @@ metadata_fingerprint
 
 ```text
 STANDARD_UPDATE_INTERVAL_SECONDS=1800
+STANDARD_UPDATE_NATIONAL_ENABLED=true
+STANDARD_UPDATE_INDUSTRY_ENABLED=false
+STANDARD_UPDATE_LOCAL_ENABLED=false
+STANDARD_UPDATE_INDUSTRY_CATEGORIES=
+STANDARD_UPDATE_LOCAL_CATEGORIES=
+STANDARD_UPDATE_SACINFO_REQUIRE_CATEGORIES=true
+STANDARD_UPDATE_SACINFO_STATUS=
+STANDARD_UPDATE_SACINFO_PAGE_SIZE=50
+STANDARD_UPDATE_SACINFO_MAX_PAGES=1
+STANDARD_UPDATE_SACINFO_MAX_ITEMS=50
+STANDARD_UPDATE_SACINFO_DOWNLOAD_PDFS=true
+STANDARD_UPDATE_SACINFO_PROCESSING_LIMIT=0
+STANDARD_UPDATE_SACINFO_REFRESH_ATLAS=true
 STANDARD_UPDATE_REQUEST_INTERVAL_SECONDS=3
 STANDARD_UPDATE_MAX_RETRIES=2
 STANDARD_UPDATE_RETRY_BACKOFF_SECONDS=3
@@ -554,6 +574,45 @@ STANDARD_UPDATE_LOG_FILE=./tools/standard-collector/logs/sync_national_updates.l
 ```text
 STANDARD_UPDATE_INTERVAL_SECONDS
   --watch 模式下每轮间隔秒数。当前默认 1800 秒，也就是 30 分钟。
+
+STANDARD_UPDATE_NATIONAL_ENABLED
+  scheduler 是否运行国家标准周期更新。默认 true。
+
+STANDARD_UPDATE_INDUSTRY_ENABLED
+  scheduler 是否运行行业标准周期更新。默认 false。
+
+STANDARD_UPDATE_LOCAL_ENABLED
+  scheduler 是否运行地方标准周期更新。默认 false。
+
+STANDARD_UPDATE_INDUSTRY_CATEGORIES
+  行业标准周期更新分类，逗号分隔。示例：YD:通信,JT:交通。
+
+STANDARD_UPDATE_LOCAL_CATEGORIES
+  地方标准周期更新分类，逗号分隔。示例：山西省,北京市。
+
+STANDARD_UPDATE_SACINFO_REQUIRE_CATEGORIES
+  行业/地方周期更新是否要求显式配置分类。默认 true，避免启动后大范围扫描。
+
+STANDARD_UPDATE_SACINFO_STATUS
+  行业/地方周期更新官网状态过滤。空值表示不过滤。
+
+STANDARD_UPDATE_SACINFO_PAGE_SIZE
+  行业/地方周期更新每页条数。
+
+STANDARD_UPDATE_SACINFO_MAX_PAGES
+  行业/地方周期更新每个分类最多扫描页数。默认 1。
+
+STANDARD_UPDATE_SACINFO_MAX_ITEMS
+  行业/地方周期更新每轮最多处理条数。默认 50，0 表示不限制。
+
+STANDARD_UPDATE_SACINFO_DOWNLOAD_PDFS
+  行业/地方周期更新发现可下载 PDF 时是否下载并写入 MinIO。
+
+STANDARD_UPDATE_SACINFO_PROCESSING_LIMIT
+  行业/地方周期更新后最多自动消费多少个本轮创建的解析/索引任务。0 表示不限制。
+
+STANDARD_UPDATE_SACINFO_REFRESH_ATLAS
+  行业/地方周期更新产生新索引后是否自动刷新 Atlas。
 
 STANDARD_UPDATE_REQUEST_INTERVAL_SECONDS
   访问官网列表页/详情页之间的间隔秒数。
@@ -689,14 +748,14 @@ STANDARD_UPDATE_NEW_MATERIALIZE_LIMIT=0
 如果本轮新增标准数量超过这个正数限制，超出的新增标准会保留：
 
 ```text
-materialize_status = not_started
-index_status = not_indexed
+materialize_status = pending
+index_status = pending
 ```
 
 后续可以由材料化索引脚本继续消费：
 
 ```powershell
-python tools/standard-collector/scripts/materialize_and_index_standards.py --watch
+python tools/standard-collector/scripts/process_standard_library_jobs.py --watch
 ```
 
 ### 10.6 防重入
@@ -1173,14 +1232,14 @@ python tools/standard-collector/scripts/sync_national_updates.py --new-materiali
 这样超过 3 条的新增标准会保留：
 
 ```text
-materialize_status = not_started
-index_status = not_indexed
+materialize_status = pending
+index_status = pending
 ```
 
 后续可以用材料化索引脚本继续处理：
 
 ```bash
-python tools/standard-collector/scripts/materialize_and_index_standards.py --watch
+python tools/standard-collector/scripts/process_standard_library_jobs.py --watch
 ```
 
 #### `--log-file`

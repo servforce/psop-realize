@@ -60,8 +60,15 @@ def test_normalize_transcript_tree_uses_asr_sentence_time_ranges():
                 "title": "qwen 润色后的段落",
                 "start_seconds": 99.0,
                 "end_seconds": 100.0,
-                "text": "润色后的正文",
+                "polished_text": "润色后的正文",
+                "business_frame_text": "第一句、第二句和第三句对应的可见画面主体清晰。",
                 "source_segment_indices": [0, 1, 2],
+                "query_graph": {
+                    "nodes": [
+                        {"id": "subject", "label": "subject", "role": "part", "required": True, "weight": 1.0},
+                    ],
+                    "edges": [],
+                },
             }
         ],
     }
@@ -79,4 +86,6 @@ def test_normalize_transcript_tree_uses_asr_sentence_time_ranges():
     assert section["start_seconds"] == 0.0
     assert section["end_seconds"] == 4.0
     assert section["source_chunks"] == [0, 1, 2]
-    assert section["text"] == "润色后的正文"
+    assert section["text"] == "第一句。 第二句。 第三句。"
+    assert section["polished_text"] == "润色后的正文"
+    assert section["business_frame_text"] == "第一句、第二句和第三句对应的可见画面主体清晰。"

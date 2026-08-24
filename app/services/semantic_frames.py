@@ -10,9 +10,8 @@ from pathlib import Path
 from typing import Any, Callable
 
 from app.core.config import settings
-from app.models.entities import VideoFrame, VideoJob
+from app.models.standard_library import VideoFrame, VideoJob
 from app.services.frame_selection import analyze_image_quality, mark_frame_rejected, mark_frame_selected
-from app.services.query_graph import is_state_node as _query_graph_node_is_state
 from app.services.query_graph import QueryGraphError, normalize_graph_id, normalize_query_graph, query_graph_prompt_terms
 
 
@@ -46,6 +45,23 @@ class SectionFilterResult:
     quality_by_frame_id: dict[int, dict[str, Any]]
 
 
+@dataclass
+class FrameMatchDetail:
+    score: float
+    matched: list[str]
+    missing: list[str]
+    negative_hits: list[str]
+    objects: list[dict[str, Any]]
+    relations: list[dict[str, Any]]
+    signals: dict[str, Any]
+    quality: dict[str, Any]
+    bbox_image_base64: str = ""
+    mask_image_base64: str = ""
+    mask_available: bool = False
+    backend: str = ""
+    devices: dict[str, str] | None = None
+
+
 FRAME_TYPE_KEYWORDS = {
     "wiring_frame": ("接线", "正极", "负极", "信号", "线"),
     "operation_frame": ("安装", "拧", "固定", "插", "按压", "工具", "螺丝"),
@@ -58,26 +74,49 @@ TERM_SYNONYMS = {
     "手部": "hand",
     "手": "hand",
     "工具": "tool",
+    "tool": "tool",
     "螺丝刀": "screwdriver",
     "十字螺丝刀": "screwdriver",
     "六角螺丝刀": "screwdriver",
+    "screwdriver": "screwdriver",
     "舵机": "servo",
-    "底座": "base",
-    "大臂": "arm",
-    "小臂": "arm",
+    "servo": "servo",
+    "底座": "robot_arm_base",
+    "基座": "robot_arm_base",
+    "底盘": "robot_arm_base",
+    "机械臂底座": "robot_arm_base",
+    "base": "robot_arm_base",
+    "robot arm base": "robot_arm_base",
+    "robot_arm_base": "robot_arm_base",
+    "大臂": "upper_arm_link",
+    "上臂": "upper_arm_link",
+    "upper arm link": "upper_arm_link",
+    "upper_arm_link": "upper_arm_link",
+    "小臂": "lower_arm_link",
+    "前臂": "lower_arm_link",
+    "lower arm link": "lower_arm_link",
+    "lower_arm_link": "lower_arm_link",
     "机械臂": "arm",
+    "arm": "arm",
     "线": "wire",
     "电线": "wire",
+    "wire": "wire",
     "控制板": "control board",
     "屏幕": "screen",
     "孔位": "screw hole",
     "螺丝孔": "screw hole",
     "螺丝": "screw",
-    "抓手": "gripper",
-    "夹手": "gripper",
-    "手腕": "wrist joint",
-    "腕关节": "wrist joint",
-    "夹爪": "gripper",
+    "screw": "screw",
+    "抓手": "gripper_assembly",
+    "夹手": "gripper_assembly",
+    "gripper": "gripper_assembly",
+    "gripper assembly": "gripper_assembly",
+    "gripper_assembly": "gripper_assembly",
+    "手腕": "wrist_joint",
+    "腕关节": "wrist_joint",
+    "wrist joint": "wrist_joint",
+    "wrist_joint": "wrist_joint",
+    "夹爪": "gripper_assembly",
     "正极": "positive terminal",
     "负极": "negative terminal",
     "+": "positive terminal",
@@ -94,9 +133,6 @@ DEFAULT_GRAPH_INDEX_SIGNALS = {
     "detail_rich",
 }
 
-GRAPH_INDEX_AUXILIARY_PROMPT_TERMS = ("hand",)
-
-
 def normalize_prompt_terms(terms: list[str] | tuple[str, ...] | None) -> tuple[str, ...]:
     normalized: list[str] = []
     seen: set[str] = set()
@@ -107,163 +143,6 @@ def normalize_prompt_terms(terms: list[str] | tuple[str, ...] | None) -> tuple[s
         normalized.append(text)
         seen.add(text)
     return tuple(normalized)
-
-
-class GraphIndexClient:
-    def __init__(
-        self,
-        *,
-        backend: str,
-        device: str,
-        yolo_world_model: str,
-        yoloe_model: str,
-        yolo_world_confidence: float,
-        yolo_world_iou: float,
-        yolo_world_max_det: int,
-    ) -> None:
-        self.backend = self._normalize_backend(backend)
-        self.device = device.strip().lower() or "cpu"
-        self.yolo_world_model = yolo_world_model.strip() or "yolov8s-world.pt"
-        self.yoloe_model = yoloe_model.strip() or "yoloe-26n-seg.pt"
-        self.yolo_world_confidence = max(0.01, float(yolo_world_confidence))
-        self.yolo_world_iou = max(0.01, min(0.99, float(yolo_world_iou)))
-        self.yolo_world_max_det = max(1, int(yolo_world_max_det))
-        self._active_model_key: tuple[str, str] | None = None
-        self._active_prompt_signature: tuple[str, ...] | None = None
-
-    @classmethod
-    def from_settings(cls) -> "GraphIndexClient":
-        return cls(
-            backend=settings.video_graph_index_backend,
-            device=settings.video_graph_index_device,
-            yolo_world_model=settings.video_graph_index_yolo_world_model,
-            yoloe_model=settings.video_graph_index_yoloe_model,
-            yolo_world_confidence=settings.video_graph_index_yolo_world_confidence,
-            yolo_world_iou=settings.video_graph_index_yolo_world_iou,
-            yolo_world_max_det=settings.video_graph_index_yolo_world_max_det,
-        )
-
-    def build_index(self, *, frame: FrameFeature, prompt_terms: list[str] | None = None) -> dict[str, Any]:
-        if self.backend == "yoloe_seg":
-            return self._build_index_prompt_model(
-                frame,
-                prompt_terms=prompt_terms,
-                backend="yoloe_seg",
-                model_name=self.yoloe_model,
-                loader=load_yoloe_model,
-            )
-        return self._build_index_prompt_model(
-            frame,
-            prompt_terms=prompt_terms,
-            backend="yolo_world",
-            model_name=self.yolo_world_model,
-            loader=load_yolo_world_model,
-        )
-
-    def _build_index_prompt_model(
-        self,
-        frame: FrameFeature,
-        *,
-        prompt_terms: list[str] | None = None,
-        backend: str,
-        model_name: str,
-        loader: Callable[[str], Any],
-    ) -> dict[str, Any]:
-        business_terms = list(normalize_prompt_terms(prompt_terms))
-        if not business_terms:
-            image = load_image_metadata(frame.path)
-            quality = frame.quality or {}
-            return {
-                "backend": backend,
-                "device": self.device,
-                "model": {
-                    backend: model_name,
-                },
-                "segmentation": "mask" if backend == "yoloe_seg" else "bbox_only",
-                "prompt_terms": [],
-                "objects": [],
-                "relations": [],
-                "signals": infer_graph_signals(
-                    quality=quality,
-                    image_size=image["size"],
-                    objects=[],
-                    relations=[],
-                ),
-                "quality": quality,
-                "image": image,
-                "raw": {
-                    "detections": {"items": [], "classes": [], "image_size": image["size"]},
-                },
-            }
-        terms = business_terms
-        if backend == "yoloe_seg":
-            terms = list(normalize_prompt_terms([*business_terms, *GRAPH_INDEX_AUXILIARY_PROMPT_TERMS]))
-        model = loader(model_name)
-        self._set_prompt_classes(model=model, backend=backend, model_name=model_name, prompt_terms=terms)
-        image = load_image_metadata(frame.path)
-        detections = detect_prompt_objects(
-            model=model,
-            image_path=frame.path,
-            prompt_terms=terms,
-            confidence=self.yolo_world_confidence,
-            iou=self.yolo_world_iou,
-            max_det=self.yolo_world_max_det,
-            device=self.device,
-        )
-        objects = build_detection_objects(detections=detections, image_size=image["size"])
-        relations = infer_graph_relations(objects, image_size=image["size"])
-        quality = frame.quality or {}
-        signals = infer_graph_signals(
-            quality=quality,
-            image_size=image["size"],
-            objects=objects,
-            relations=relations,
-        )
-        return {
-            "backend": backend,
-            "device": self.device,
-            "model": {
-                backend: model_name,
-            },
-            "segmentation": "mask" if backend == "yoloe_seg" else "bbox_only",
-            "prompt_terms": terms,
-            "objects": objects,
-            "relations": relations,
-            "signals": signals,
-            "quality": quality,
-            "image": image,
-            "raw": {
-                "detections": detections,
-            },
-        }
-
-    @staticmethod
-    def _normalize_backend(value: str) -> str:
-        backend = str(value or "").strip().lower()
-        if backend in {"yoloe", "yoloe_seg", "yoloe-seg"}:
-            return "yoloe_seg"
-        if backend in {"yolo_world", "yolo-world", "world"}:
-            return "yolo_world"
-        return "yolo_world"
-
-    def _set_prompt_classes(
-        self,
-        *,
-        model: Any,
-        backend: str,
-        model_name: str,
-        prompt_terms: list[str],
-    ) -> None:
-        prompt_signature = normalize_prompt_terms(prompt_terms)
-        model_key = (backend, model_name)
-        if self._active_model_key != model_key:
-            self._active_model_key = model_key
-            self._active_prompt_signature = None
-        if not prompt_signature or prompt_signature == self._active_prompt_signature:
-            return
-        if hasattr(model, "set_classes"):
-            model.set_classes(list(prompt_signature))
-        self._active_prompt_signature = prompt_signature
 
 
 def build_semantic_frame_match_report(
@@ -308,11 +187,12 @@ def build_semantic_frame_match_report(
             quality_report,
             dedup_report,
         )
-    similarities = compute_section_frame_similarities(
+    match_details = compute_section_frame_match_details_finetuned(
         sections=sections,
         candidates_by_operation=filter_result.candidates_by_operation,
         progress_callback=progress_callback,
     )
+    similarities = {key: value.score for key, value in match_details.items()}
     best_by_frame: dict[int, tuple[dict[str, Any], float]] = {}
     for section in sections:
         section_index = int(section["index"])
@@ -342,7 +222,7 @@ def build_semantic_frame_match_report(
             reason="Semantic frame candidate scored by graph index matching.",
             details={
                 "stage": "graph_index_matching",
-                "graph_index_backend": settings.video_graph_index_backend,
+                "graph_index_backend": "finetuned_yolo_world_sam",
                 "best_section_index": section_index,
                 "best_section_title": section.get("title") or "",
                 "best_score": score,
@@ -369,6 +249,7 @@ def build_semantic_frame_match_report(
             candidates_by_operation=filter_result.candidates_by_operation,
             raw_statuses_by_section=filter_result.raw_statuses_by_section,
             similarities=similarities,
+            match_details=match_details,
         ),
         quality_report,
         dedup_report,
@@ -395,21 +276,16 @@ def build_frame_filter_report(
     relevant_frame_ids: set[int] = set()
     for section in sections:
         section_index = int(section["index"])
-        for operation in section.get("visual_operations") or []:
-            if not isinstance(operation, dict):
-                continue
-            operation_index = parse_optional_int(operation.get("index"))
-            if operation_index is None:
-                continue
-            operation_frames = frames_for_section(frames, operation, padding_seconds=SECTION_FRAME_PADDING_SECONDS)
-            operation_frames_by_key[(section_index, operation_index)] = operation_frames
-            relevant_frame_ids.update(int(frame.id) for frame in operation_frames)
+        operation_index = 1
+        operation_frames = frames_for_section(frames, section, padding_seconds=SECTION_FRAME_PADDING_SECONDS)
+        operation_frames_by_key[(section_index, operation_index)] = operation_frames
+        relevant_frame_ids.update(int(frame.id) for frame in operation_frames)
 
     frames_to_evaluate = [frame for frame in frames if int(frame.id) in relevant_frame_ids]
     feature_by_frame_id: dict[int, FrameFeature] = {}
     quality_by_frame_id: dict[int, dict[str, Any]] = {}
     total_frames = len(frames_to_evaluate)
-    notify_progress(progress_callback, "filtering_frames", 0, total_frames, "关键操作时间窗内图像质量过滤")
+    notify_progress(progress_callback, "filtering_frames", 0, total_frames, "段落时间窗内图像质量过滤")
     for index, frame in enumerate(frames_to_evaluate, start=1):
         frame_id = int(frame.id)
         path = frame_paths_by_object_key.get(frame.object_key)
@@ -428,7 +304,7 @@ def build_frame_filter_report(
                     "details": {"missing_local_file": True},
                 }
             )
-            notify_progress(progress_callback, "filtering_frames", index, total_frames, "关键操作时间窗内图像质量过滤")
+            notify_progress(progress_callback, "filtering_frames", index, total_frames, "段落时间窗内图像质量过滤")
             continue
 
         image_bytes = path.read_bytes()
@@ -448,7 +324,7 @@ def build_frame_filter_report(
             }
         )
         if not quality.passed:
-            notify_progress(progress_callback, "filtering_frames", index, total_frames, "关键操作时间窗内图像质量过滤")
+            notify_progress(progress_callback, "filtering_frames", index, total_frames, "段落时间窗内图像质量过滤")
             continue
 
         feature_by_frame_id[frame_id] = FrameFeature(
@@ -457,7 +333,7 @@ def build_frame_filter_report(
             quality=quality.details,
             quality_score=quality_score(quality.details),
         )
-        notify_progress(progress_callback, "filtering_frames", index, total_frames, "关键操作时间窗内图像质量过滤")
+        notify_progress(progress_callback, "filtering_frames", index, total_frames, "段落时间窗内图像质量过滤")
 
     candidates_by_section: dict[int, list[FrameFeature]] = {}
     candidates_by_operation: dict[tuple[int, int], list[FrameFeature]] = {}
@@ -477,12 +353,8 @@ def build_frame_filter_report(
                     "filter_reason": quality_item.get("reason") or "Frame failed quality filtering.",
                 }
 
-        for operation in section.get("visual_operations") or []:
-            if not isinstance(operation, dict):
-                continue
-            operation_index = parse_optional_int(operation.get("index"))
-            if operation_index is None:
-                continue
+        for operation in section_query_operations(section):
+            operation_index = 1
             operation_features = [
                 feature_by_frame_id[int(frame.id)]
                 for frame in operation_frames_by_key.get((section_index, operation_index), [])
@@ -495,11 +367,11 @@ def build_frame_filter_report(
                 key=lambda item: (int(item.frame.timestamp_ms or 0), int(item.frame.id or 0)),
             )
             for group in operation_groups:
-                dedup_group_id = f"section_{section_index}_operation_{operation_index}_{group.id}"
+                dedup_group_id = f"section_{section_index}_query_graph_{group.id}"
                 dedup_report["groups"].append(
                     {
                         "section_index": section_index,
-                        "operation_index": operation_index,
+                        "query_graph_index": operation_index,
                         "dedup_group_id": dedup_group_id,
                         "representative_frame_id": group.representative.frame.id,
                         "group_size": len(group.items),
@@ -510,7 +382,7 @@ def build_frame_filter_report(
                     dedup_report["frames"].append(
                         {
                             "section_index": section_index,
-                            "operation_index": operation_index,
+                            "query_graph_index": operation_index,
                             "frame_id": item.frame.id,
                             "dedup_status": "kept"
                             if item.frame.id == group.representative.frame.id
@@ -530,8 +402,8 @@ def build_frame_filter_report(
                     raw_statuses[int(item.frame.id)] = {
                         "filter_status": "duplicate_rejected",
                         "filter_label": "重复",
-                        "filter_reason": "Rejected as a duplicate frame in this visual operation window.",
-                        "dedup_group_id": f"section_{section_index}_operation_{operation_index}_{group.id}",
+                        "filter_reason": "Rejected as a duplicate frame in this transcript section window.",
+                        "dedup_group_id": f"section_{section_index}_query_graph_{group.id}",
                         "duplicate_of_frame_id": group.representative.frame.id,
                     }
 
@@ -594,9 +466,9 @@ def mark_non_candidate_frames_rejected(
             mark_frame_rejected(
                 frame,
                 score=0.0,
-                reason="Frame is outside all visual operation windows.",
+                reason="Frame is outside all transcript section windows.",
                 details={
-                    "stage": "visual_operation_window",
+                    "stage": "section_window",
                     "section_padding_seconds": SECTION_FRAME_PADDING_SECONDS,
                 },
                 matched_section_index=None,
@@ -656,22 +528,19 @@ def extract_sections(tree: dict[str, Any]) -> list[dict[str, Any]]:
         section_index = parse_optional_int(section.get("index")) or index
         title = str(section.get("title") or f"段落 {section_index}").strip()
         text = str(section.get("text") or "").strip()
-        visual_operations = extract_visual_operations(section, section_index=section_index, title=title, text=text)
-        frame_queries = [
-            str(operation.get("frame_query") or "")
-            for operation in visual_operations
-            if str(operation.get("frame_query") or "").strip()
-        ]
-        graph_query_text = "\n".join(frame_queries).strip()
+        polished_text = str(section.get("polished_text") or "").strip()
+        business_frame_text = str(section.get("business_frame_text") or "").strip()
+        query_graph = extract_section_query_graph(section, section_index=section_index, title=title)
         sections.append(
             {
                 "index": section_index,
                 "title": title,
                 "text": text,
-                "frame_queries": frame_queries,
-                "frame_queries_source": "visual_operations" if visual_operations else "none",
-                "visual_operations": visual_operations,
-                "graph_query_text": graph_query_text,
+                "polished_text": polished_text,
+                "business_frame_text": business_frame_text,
+                "query_graph": query_graph,
+                "query_graph_terms": query_graph_prompt_terms(query_graph),
+                "graph_query_text": business_frame_text,
                 "start_seconds": parse_float(section.get("start_seconds")),
                 "end_seconds": parse_float(section.get("end_seconds")),
                 "start_time": section.get("start_time"),
@@ -681,100 +550,12 @@ def extract_sections(tree: dict[str, Any]) -> list[dict[str, Any]]:
     return sections
 
 
-def extract_visual_operations(section: dict[str, Any], *, section_index: int, title: str, text: str) -> list[dict[str, Any]]:
-    raw_operations = section.get("visual_operations")
-    if isinstance(raw_operations, list):
-        operations = []
-        for index, raw_operation in enumerate(raw_operations, start=1):
-            if not isinstance(raw_operation, dict):
-                continue
-            operation_index = parse_optional_int(raw_operation.get("index")) or index
-            frame_query = " ".join(str(raw_operation.get("frame_query") or "").split()).strip()
-            if not frame_query:
-                continue
-            operation_text = " ".join(
-                str(raw_operation.get("operation_text") or raw_operation.get("text") or frame_query).split()
-            ).strip()
-            try:
-                query_graph = normalize_query_graph(raw_operation.get("query_graph"))
-            except QueryGraphError as exc:
-                source_indices = normalize_source_indices(
-                    raw_operation.get("source_segment_indices") or raw_operation.get("source_chunks")
-                )
-                operation_context = (
-                    f"section_index={section_index}, section_title={title!r}, "
-                    f"operation_position={index}, raw_operation_index={raw_operation.get('index')!r}, "
-                    f"source_segment_indices={source_indices}, operation_text={operation_text[:160]!r}, "
-                    f"frame_query={frame_query[:160]!r}"
-                )
-                raise RuntimeError(f"{exc}: {operation_context}") from exc
-            operations.append(
-                {
-                    "index": operation_index,
-                    "operation_text": operation_text,
-                    "source_segment_indices": normalize_source_indices(
-                        raw_operation.get("source_segment_indices") or raw_operation.get("source_chunks")
-                    ),
-                    "priority": normalize_priority(raw_operation.get("priority")),
-                    "frame_query": frame_query,
-                    "visual_terms": query_graph_prompt_terms(query_graph),
-                    "query_graph": query_graph,
-                    "start_seconds": parse_float(raw_operation.get("start_seconds")),
-                    "end_seconds": parse_float(raw_operation.get("end_seconds")),
-                    "start_time": raw_operation.get("start_time"),
-                    "end_time": raw_operation.get("end_time"),
-                }
-            )
-        return operations
-
-    return []
-
-
-def normalize_priority(value: Any) -> str:
-    priority = str(value or "medium").strip().lower()
-    return priority if priority in {"high", "medium", "low"} else "medium"
-
-
-def normalize_frame_queries(value: Any, *, title: str, text: str) -> list[str]:
-    raw_items = value if isinstance(value, list) else [value]
-    queries: list[str] = []
-    seen: set[str] = set()
-    for item in raw_items:
-        query = " ".join(str(item or "").split()).strip()
-        if not query or query in seen:
-            continue
-        queries.append(query)
-        seen.add(query)
-        if len(queries) >= 3:
-            break
-
-    if queries:
-        return queries
-
-    fallback = f"{title}\n{text}".strip()
-    return [fallback] if fallback else []
-
-
-def normalize_frame_queries_source(
-    value: Any,
-    *,
-    raw_frame_queries: Any,
-    frame_queries: list[str],
-    title: str,
-    text: str,
-) -> str:
-    source = str(value or "").strip()
-    if source in {"model", "fallback_title_text"}:
-        return source
-
-    raw_items = raw_frame_queries if isinstance(raw_frame_queries, list) else [raw_frame_queries]
-    has_raw_query = any(str(item or "").strip() for item in raw_items)
-    fallback = f"{title}\n{text}".strip()
-    if not has_raw_query:
-        return "fallback_title_text"
-    if fallback and len(frame_queries) == 1 and frame_queries[0] == fallback:
-        return "fallback_title_text"
-    return "model"
+def extract_section_query_graph(section: dict[str, Any], *, section_index: int, title: str) -> dict[str, Any]:
+    raw_graph = section.get("query_graph")
+    try:
+        return normalize_query_graph(raw_graph)
+    except QueryGraphError as exc:
+        raise RuntimeError(f"{exc}: section_index={section_index}, section_title={title!r}") from exc
 
 
 def deduplicate_frames(
@@ -882,8 +663,15 @@ def quality_score(details: dict[str, Any]) -> float:
     return max(0.0, min(1.0, blur * 0.6 + brightness_score * 0.3 + exposure_score * 0.1))
 
 
+def image_size_from_quality(quality: dict[str, Any]) -> dict[str, int]:
+    return {
+        "width": max(1, int(quality.get("width") or 0)),
+        "height": max(1, int(quality.get("height") or 0)),
+    }
+
+
 @lru_cache(maxsize=4)
-def load_graph_index_models(*, yolo_world_model: str, mobile_sam_model: str, device: str) -> tuple[Any, Any]:
+def load_mobile_sam_model(model_name: str, *, device: str) -> Any:
     try:
         from ultralytics import SAM
     except ImportError as exc:  # pragma: no cover - exercised only in a missing-dependency environment
@@ -892,16 +680,13 @@ def load_graph_index_models(*, yolo_world_model: str, mobile_sam_model: str, dev
             "Install the project dependencies first."
         ) from exc
 
-    yolo_world = load_yolo_world_model(yolo_world_model)
-    mobile_sam = SAM(mobile_sam_model)
-
-    for model in (yolo_world, mobile_sam):
-        if hasattr(model, "to"):
-            try:
-                model.to(device)
-            except Exception:
-                pass
-    return yolo_world, mobile_sam
+    model = SAM(model_name)
+    if hasattr(model, "to"):
+        try:
+            model.to(device)
+        except Exception:
+            pass
+    return model
 
 
 @lru_cache(maxsize=4)
@@ -910,18 +695,6 @@ def load_yolo_world_model(model_name: str) -> Any:
         from ultralytics import YOLOWorld
 
         return YOLOWorld(model_name)
-    except Exception:
-        from ultralytics import YOLO
-
-        return YOLO(model_name)
-
-
-@lru_cache(maxsize=4)
-def load_yoloe_model(model_name: str) -> Any:
-    try:
-        from ultralytics import YOLOE
-
-        return YOLOE(model_name)
     except Exception:
         from ultralytics import YOLO
 
@@ -1260,7 +1033,7 @@ def bbox_centroid(box: list[float]) -> tuple[float, float]:
     return ((x1 + x2) / 2.0, (y1 + y2) / 2.0)
 
 
-def bbox_touches_border(box: list[float], *, width: int, height: int, margin_ratio: float = 0.02) -> bool:
+def bbox_touches_border(box: list[float], *, width: int, height: int, margin_ratio: float = 0.0) -> bool:
     if len(box) < 4 or width <= 0 or height <= 0:
         return False
     x1, y1, x2, y2 = [float(value) for value in box[:4]]
@@ -1587,7 +1360,7 @@ def infer_frame_type(section: dict[str, Any], operation: dict[str, Any]) -> str:
         str(item or "")
         for item in (
             operation.get("operation_text"),
-            operation.get("frame_query"),
+            operation.get("business_frame_text"),
             section.get("title"),
             section.get("text"),
         )
@@ -1596,6 +1369,28 @@ def infer_frame_type(section: dict[str, Any], operation: dict[str, Any]) -> str:
         if any(keyword in text for keyword in keywords):
             return frame_type
     return "overview_frame"
+
+
+def section_query_operations(section: dict[str, Any]) -> list[dict[str, Any]]:
+    query_graph = section.get("query_graph")
+    if not isinstance(query_graph, dict):
+        return []
+    business_frame_text = str(section.get("business_frame_text") or "").strip()
+    return [
+        {
+            "index": 1,
+            "operation_text": str(section.get("title") or "").strip(),
+            "source_segment_indices": section.get("source_chunks") or section.get("source_segment_indices") or [],
+            "priority": "medium",
+            "polished_text": str(section.get("polished_text") or "").strip(),
+            "business_frame_text": business_frame_text,
+            "query_graph": query_graph,
+            "start_seconds": section.get("start_seconds"),
+            "end_seconds": section.get("end_seconds"),
+            "start_time": section.get("start_time"),
+            "end_time": section.get("end_time"),
+        }
+    ]
 
 
 def tokenize_query_terms(text: str) -> list[str]:
@@ -1639,19 +1434,24 @@ def normalize_visual_terms(value: Any) -> list[str]:
 
 
 def build_query_spec(*, section: dict[str, Any], operation: dict[str, Any]) -> dict[str, Any]:
-    frame_query = str(operation.get("frame_query") or "").strip()
     operation_text = str(operation.get("operation_text") or "").strip()
+    business_frame_text = str(operation.get("business_frame_text") or section.get("business_frame_text") or "").strip()
+    polished_text = str(operation.get("polished_text") or section.get("polished_text") or "").strip()
     frame_type = infer_frame_type(section, operation)
     try:
-        query_graph = normalize_query_graph(operation.get("query_graph"))
+        query_graph = normalize_query_graph(operation.get("query_graph") or section.get("query_graph"))
     except QueryGraphError as exc:
         raise RuntimeError(str(exc)) from exc
     visual_terms = query_graph_prompt_terms(query_graph)
-    query_terms = tokenize_query_terms(f"{frame_query} {operation_text} {section.get('title') or ''} {section.get('text') or ''}")
-    negative_labels = ["blur", "occluded", "tiny_subject"]
+    query_terms = tokenize_query_terms(
+        f"{business_frame_text} {polished_text} {operation_text} {section.get('title') or ''}"
+    )
+    negative_labels = ["blur", "occluded"]
     return {
         "frame_type": frame_type,
-        "target": frame_query or operation_text or str(section.get("title") or ""),
+        "target": business_frame_text or operation_text or str(section.get("title") or ""),
+        "business_frame_text": business_frame_text,
+        "polished_text": polished_text,
         "query_graph": query_graph,
         "visual_terms": visual_terms,
         "query_graph_terms": visual_terms,
@@ -1735,8 +1535,7 @@ def graph_index_match_score(*, query_spec: dict[str, Any], graph_index: dict[str
 
     query_nodes = [item for item in query_graph.get("nodes") or [] if isinstance(item, dict)]
     query_edges = [item for item in query_graph.get("edges") or [] if isinstance(item, dict)]
-    query_state = query_graph.get("state") if isinstance(query_graph.get("state"), dict) else {}
-    object_query_nodes = [node for node in query_nodes if not _query_graph_node_is_state(node)]
+    object_query_nodes = query_nodes
     query_node_by_id = {normalize_graph_id(node.get("id")): node for node in query_nodes if normalize_graph_id(node.get("id"))}
 
     matched: list[str] = []
@@ -1889,8 +1688,6 @@ def graph_index_match_score(*, query_spec: dict[str, Any], graph_index: dict[str
         relation = normalize_graph_relation(edge.get("relation") or edge.get("type"))
         source_node = query_node_by_id.get(source_id)
         target_node = query_node_by_id.get(target_id)
-        if (source_node and _query_graph_node_is_state(source_node)) or (target_node and _query_graph_node_is_state(target_node)):
-            continue
         weight = query_item_weight(edge)
         total_edge_weight += weight
         left_node = source_node if source_node in object_query_nodes else None
@@ -1965,25 +1762,6 @@ def graph_index_match_score(*, query_spec: dict[str, Any], graph_index: dict[str
         signals=signals,
     )
 
-    state_score = 0.0
-    if query_state:
-        state_type = normalize_graph_label(query_state.get("type"))
-        if state_type:
-            completion_related = {"completion", "complete", "completed", "fixed", "connected", "installed", "assembled", "ready"}
-            state_quality = 0.0
-            if state_type in completion_related:
-                state_quality = clamp_unit(
-                    0.40 * node_score
-                    + 0.30 * edge_score
-                    + 0.20 * visibility_score
-                    + 0.10 * clamp_unit(float(quality_score_value))
-                )
-                if bool(signals.get("clear_key_region")) and bool(signals.get("not_blurry")):
-                    state_quality = max(state_quality, clamp_unit(0.55 * node_score + 0.25 * edge_score + 0.20 * clamp_unit(float(quality_score_value))))
-            else:
-                state_quality = clamp_unit(0.50 * node_score + 0.30 * edge_score + 0.20 * visibility_score)
-            state_score = state_quality
-
     expected_signals = [
         signal
         for signal in query_spec_to_signals(query_spec)
@@ -1994,20 +1772,16 @@ def graph_index_match_score(*, query_spec: dict[str, Any], graph_index: dict[str
         signal_hits = sum(1 for signal in expected_signals if signal_present(signal))
         signal_score = signal_hits / len(expected_signals)
 
-    score = 0.42 * clamp_unit(node_score)
-    score += 0.28 * clamp_unit(edge_score)
-    score += 0.14 * clamp_unit(state_score)
+    score = 0.48 * clamp_unit(node_score)
+    score += 0.32 * clamp_unit(edge_score)
     score += 0.08 * clamp_unit(visibility_score if matched_objects else 0.0)
     score += 0.05 * clamp_unit(float(quality_score_value))
-    score += 0.03 * clamp_unit(signal_score)
+    score += 0.04 * clamp_unit(signal_score)
     score += 0.03 * clamp_unit(spatial_score)
 
     if bool(signals.get("blur")) or bool(signals.get("not_blurry") is False):
         score -= 0.10
         negative_hits.append("blur")
-    if bool(signals.get("tiny_subject")):
-        score -= 0.12
-        negative_hits.append("tiny_subject")
     if bool(signals.get("occluded")):
         score -= 0.08 + 0.10 * (1.0 - clamp_unit(visibility_score))
         negative_hits.append("occluded")
@@ -2032,125 +1806,132 @@ def graph_index_match_score(*, query_spec: dict[str, Any], graph_index: dict[str
     return clamp_unit(score), matched, missing, negative_hits
 
 
-def _compute_section_frame_similarities_legacy_unused(
-    *,
-    sections: list[dict[str, Any]],
-    candidates_by_operation: dict[tuple[int, int], list[FrameFeature]],
-    progress_callback: Callable[[str, int, int, str], None] | None = None,
-) -> dict[tuple[int, int, int], float]:
-    client = GraphIndexClient.from_settings()
-    query_specs: dict[tuple[int, int], dict[str, Any]] = {}
-    prompt_terms_by_operation: dict[tuple[int, int], tuple[str, ...]] = {}
-    for section in sections:
-        section_index = int(section["index"])
-        for operation in section.get("visual_operations") or []:
-            if not isinstance(operation, dict):
-                continue
-            operation_index = parse_optional_int(operation.get("index"))
-            if operation_index is None:
-                continue
-            query_spec = build_query_spec(section=section, operation=operation)
-            query_specs[(section_index, operation_index)] = query_spec
-            prompt_terms_by_operation[(section_index, operation_index)] = normalize_prompt_terms(
-                [str(term).strip() for term in query_spec.get("query_graph_terms") or [] if str(term).strip()]
-            )
-
-    graph_index_cache: dict[tuple[int, tuple[str, ...]], dict[str, Any]] = {}
-    similarities: dict[tuple[int, int, int], float] = {}
-    total_candidates = sum(len(candidates) for candidates in candidates_by_operation.values())
-    processed_candidates = 0
-    for section in sections:
-        notify_progress(progress_callback, "semantic_matching", index, total_candidates, "图索引构建与匹配")
-        prompt_terms = sorted(frame_prompt_terms.get(int(item.frame.id), set()))
-        graph_index = item.graph_index or client.build_index(frame=item, prompt_terms=prompt_terms)
-        item.graph_index = graph_index
-        frame_indexes[int(item.frame.id)] = graph_index
-
-    similarities: dict[tuple[int, int, int], float] = {}
-    for section in sections:
-        section_index = int(section["index"])
-        for operation in section.get("visual_operations") or []:
-            if not isinstance(operation, dict):
-                continue
-            operation_index = parse_optional_int(operation.get("index"))
-            if operation_index is None:
-                continue
-            query_spec = query_specs.get((section_index, operation_index)) or build_query_spec(section=section, operation=operation)
-            for item in candidates_by_operation.get((section_index, operation_index), []):
-                frame_id = int(item.frame.id)
-                prompt_terms = sorted(frame_prompt_terms.get(frame_id, set()))
-                graph_index = frame_indexes.get(frame_id) or client.build_index(frame=item, prompt_terms=prompt_terms)
-                score, _, _, _ = graph_index_match_score(
-                    query_spec=query_spec,
-                    graph_index=graph_index,
-                    quality_score_value=item.quality_score,
-                )
-                similarities[(section_index, operation_index, frame_id)] = score
-    return similarities
-
-
 def compute_section_frame_similarities(
     *,
     sections: list[dict[str, Any]],
     candidates_by_operation: dict[tuple[int, int], list[FrameFeature]],
     progress_callback: Callable[[str, int, int, str], None] | None = None,
 ) -> dict[tuple[int, int, int], float]:
-    client = GraphIndexClient.from_settings()
+    details = compute_section_frame_match_details(
+        sections=sections,
+        candidates_by_operation=candidates_by_operation,
+        progress_callback=progress_callback,
+    )
+    return {key: value.score for key, value in details.items()}
+
+
+def compute_section_frame_match_details(
+    *,
+    sections: list[dict[str, Any]],
+    candidates_by_operation: dict[tuple[int, int], list[FrameFeature]],
+    progress_callback: Callable[[str, int, int, str], None] | None = None,
+) -> dict[tuple[int, int, int], FrameMatchDetail]:
+    return compute_section_frame_match_details_finetuned(
+        sections=sections,
+        candidates_by_operation=candidates_by_operation,
+        progress_callback=progress_callback,
+    )
+
+
+def compute_section_frame_match_details_finetuned(
+    *,
+    sections: list[dict[str, Any]],
+    candidates_by_operation: dict[tuple[int, int], list[FrameFeature]],
+    progress_callback: Callable[[str, int, int, str], None] | None = None,
+) -> dict[tuple[int, int, int], FrameMatchDetail]:
+    from app.services.finetuned_frame_matching import segment_images_finetuned_detect
+
     query_specs: dict[tuple[int, int], dict[str, Any]] = {}
-    prompt_terms_by_operation: dict[tuple[int, int], tuple[str, ...]] = {}
     for section in sections:
         section_index = int(section["index"])
-        for operation in section.get("visual_operations") or []:
-            if not isinstance(operation, dict):
-                continue
-            operation_index = parse_optional_int(operation.get("index"))
-            if operation_index is None:
-                continue
-            query_spec = build_query_spec(section=section, operation=operation)
-            query_specs[(section_index, operation_index)] = query_spec
-            prompt_terms_by_operation[(section_index, operation_index)] = normalize_prompt_terms(
-                [str(term).strip() for term in query_spec.get("query_graph_terms") or [] if str(term).strip()]
-            )
+        for operation in section_query_operations(section):
+            query_specs[(section_index, 1)] = build_query_spec(section=section, operation=operation)
 
-    similarities: dict[tuple[int, int, int], float] = {}
-    graph_index_cache: dict[tuple[int, tuple[str, ...]], dict[str, Any]] = {}
-    total_candidates = sum(len(candidates) for candidates in candidates_by_operation.values())
+    all_candidates = unique_candidates(candidates_by_operation)
+    total_candidates = len(all_candidates)
+    notify_progress(progress_callback, "semantic_matching", 0, total_candidates, "Business frame filter: finetuned detect, SAM mask, graph matching")
+    image_files = [
+        (item.frame.object_key.rsplit("/", 1)[-1], item.path.read_bytes())
+        for item in all_candidates
+    ]
+    segmentation_results = segment_images_finetuned_detect(image_files=image_files)
+    segmented_by_filename = {result.filename: result for result in segmentation_results}
+
+    details: dict[tuple[int, int, int], FrameMatchDetail] = {}
     processed_candidates = 0
-
     for section in sections:
         section_index = int(section["index"])
-        for operation in section.get("visual_operations") or []:
-            if not isinstance(operation, dict):
-                continue
-            operation_index = parse_optional_int(operation.get("index"))
-            if operation_index is None:
-                continue
+        for operation in section_query_operations(section):
+            operation_index = 1
             query_spec = query_specs.get((section_index, operation_index)) or build_query_spec(section=section, operation=operation)
-            prompt_terms = prompt_terms_by_operation.get(
-                (section_index, operation_index),
-                tuple(),
-            )
             for item in candidates_by_operation.get((section_index, operation_index), []):
                 processed_candidates += 1
-                notify_progress(progress_callback, "semantic_matching", processed_candidates, total_candidates, "鍥剧储寮曟瀯寤轰笌鍖归厤")
-                frame_id = int(item.frame.id)
-                prompt_cache = item.graph_index_by_prompt or {}
-                graph_index = prompt_cache.get(prompt_terms) or graph_index_cache.get((frame_id, prompt_terms))
-                if graph_index is None:
-                    graph_index = client.build_index(frame=item, prompt_terms=list(prompt_terms))
-                    graph_index_cache[(frame_id, prompt_terms)] = graph_index
-                if item.graph_index_by_prompt is None:
-                    item.graph_index_by_prompt = {}
-                item.graph_index_by_prompt[prompt_terms] = graph_index
+                notify_progress(
+                    progress_callback,
+                    "semantic_matching",
+                    min(processed_candidates, total_candidates),
+                    total_candidates,
+                    "Business frame filter: graph matching",
+                )
+                filename = item.frame.object_key.rsplit("/", 1)[-1]
+                result = segmented_by_filename.get(filename)
+                if result is None:
+                    details[(section_index, operation_index, int(item.frame.id))] = FrameMatchDetail(
+                        score=0.0,
+                        matched=[],
+                        missing=list(query_spec.get("required_labels") or []),
+                        negative_hits=[],
+                        objects=[],
+                        relations=[],
+                        signals={},
+                        quality=item.quality,
+                        backend="finetuned_yolo_world_sam",
+                    )
+                    continue
+                image_size = image_size_from_quality(result.quality)
+                relations = infer_graph_relations(result.objects, image_size=image_size)
+                signals = infer_graph_signals(
+                    quality=result.quality,
+                    image_size=image_size,
+                    objects=result.objects,
+                    relations=relations,
+                )
+                graph_index = {
+                    "backend": "finetuned_yolo_world_sam",
+                    "prompt_terms": query_spec.get("query_graph_terms") or [],
+                    "objects": result.objects,
+                    "relations": relations,
+                    "signals": signals,
+                    "quality": result.quality,
+                    "image": {"size": image_size},
+                    "raw": {},
+                }
                 item.graph_index = graph_index
-                score, _, _, _ = graph_index_match_score(
+                score, matched, missing, negative_hits = graph_index_match_score(
                     query_spec=query_spec,
                     graph_index=graph_index,
-                    quality_score_value=item.quality_score,
+                    quality_score_value=quality_score(result.quality),
                 )
-                similarities[(section_index, operation_index, frame_id)] = score
+                details[(section_index, operation_index, int(item.frame.id))] = FrameMatchDetail(
+                    score=score,
+                    matched=matched,
+                    missing=missing,
+                    negative_hits=negative_hits,
+                    objects=result.objects,
+                    relations=relations,
+                    signals=signals,
+                    quality=result.quality,
+                    bbox_image_base64=result.bbox_image_base64,
+                    mask_image_base64=result.mask_image_base64,
+                    mask_available=result.mask_available,
+                    backend="finetuned_yolo_world_sam",
+                    devices={
+                        "mobile_sam": result.mobile_sam_device,
+                        "yolo_world": result.yolo_world_device,
+                    },
+                )
 
-    return similarities
+    return details
 
 
 def notify_progress(
@@ -2172,11 +1953,8 @@ def best_section_frame_similarity(
     similarities: dict[tuple[int, int, int], float],
 ) -> float:
     section_index = int(section["index"])
-    operations = section.get("visual_operations") if isinstance(section.get("visual_operations"), list) else []
     scores = [
-        similarities.get((section_index, int(operation.get("index") or 0), frame_id), 0.0)
-        for operation in operations
-        if isinstance(operation, dict)
+        similarities.get((section_index, 1, frame_id), 0.0)
     ]
     return max(scores) if scores else 0.0
 
@@ -2190,15 +1968,12 @@ def build_report(
     candidates_by_operation: dict[tuple[int, int], list[FrameFeature]],
     raw_statuses_by_section: dict[int, dict[int, dict[str, Any]]],
     similarities: dict[tuple[int, int, int], float],
+    match_details: dict[tuple[int, int, int], FrameMatchDetail] | None = None,
 ) -> dict[str, Any]:
     frames_by_id = {int(frame.id): frame for frame in frames}
     candidate_ids = {int(item.frame.id) for item in unique_candidates(candidates_by_operation)}
     operation_candidate_total = sum(len(candidates) for candidates in candidates_by_operation.values())
-    visual_operation_count = sum(
-        len(section.get("visual_operations") or [])
-        for section in sections
-        if isinstance(section.get("visual_operations"), list)
-    )
+    query_graph_count = sum(1 for section in sections if isinstance(section.get("query_graph"), dict))
     payload_sections = []
 
     for section in sections:
@@ -2237,11 +2012,12 @@ def build_report(
             }
             for rank, frame in enumerate(ranked, start=1)
         ]
-        frame_query_matches = build_frame_query_matches(
+        query_graph_matches = build_query_graph_matches(
             job=job,
             section=section,
             candidates_by_operation=candidates_by_operation,
             similarities=similarities,
+            match_details=match_details or {},
         )
         window = section_time_window(section, padding_seconds=SECTION_FRAME_PADDING_SECONDS)
         payload_sections.append(
@@ -2251,45 +2027,44 @@ def build_report(
                 "frame_window_end_seconds": window[1] if window else None,
                 "frame_window_padding_seconds": SECTION_FRAME_PADDING_SECONDS,
                 "raw_frames": raw_frames,
-                "frame_query_matches": frame_query_matches,
+                "candidate_business_frames": [
+                    frame_ref(job.id, item.frame)
+                    for item in section_operation_candidates
+                ],
+                "query_graph_matches": query_graph_matches,
                 "semantic_frames": semantic_frames,
             }
         )
     return {
         "version": "1.1",
         "video_id": job.id,
-        "graph_index_backend": settings.video_graph_index_backend,
+        "graph_index_backend": "finetuned_yolo_world_sam",
         "section_frame_padding_seconds": SECTION_FRAME_PADDING_SECONDS,
         "summary": {
             "raw_frame_count": len(frames),
             "candidate_frame_count": len(candidate_ids),
             "section_candidate_frame_count": operation_candidate_total,
             "section_count": len(sections),
-            "frame_query_count": visual_operation_count,
-            "visual_operation_count": visual_operation_count,
+            "query_graph_count": query_graph_count,
         },
         "sections": payload_sections,
         "candidate_frames": [frame_ref(job.id, frames_by_id[frame_id]) for frame_id in sorted(candidate_ids)],
     }
 
 
-def build_frame_query_matches(
+def build_query_graph_matches(
     *,
     job: VideoJob,
     section: dict[str, Any],
     candidates_by_operation: dict[tuple[int, int], list[FrameFeature]],
     similarities: dict[tuple[int, int, int], float],
+    match_details: dict[tuple[int, int, int], FrameMatchDetail] | None = None,
 ) -> list[dict[str, Any]]:
     section_index = int(section["index"])
-    visual_operations = section.get("visual_operations") if isinstance(section.get("visual_operations"), list) else []
     matches: list[dict[str, Any]] = []
-    for operation in visual_operations:
-        if not isinstance(operation, dict):
-            continue
-        query_index = parse_optional_int(operation.get("index"))
-        if query_index is None:
-            continue
-        query = str(operation.get("frame_query") or "")
+    for operation in section_query_operations(section):
+        query_index = 1
+        business_frame_text = str(operation.get("business_frame_text") or section.get("business_frame_text") or "")
         frames = [item.frame for item in candidates_by_operation.get((section_index, query_index), [])]
         ranked = sorted(
             frames,
@@ -2299,34 +2074,53 @@ def build_frame_query_matches(
         matches.append(
             {
                 "query_index": query_index,
-                "operation_index": query_index,
-                "operation_text": str(operation.get("operation_text") or query),
-                "operation_start_seconds": operation.get("start_seconds"),
-                "operation_end_seconds": operation.get("end_seconds"),
-                "operation_start_time": operation.get("start_time"),
-                "operation_end_time": operation.get("end_time"),
-                "priority": operation.get("priority") or "medium",
-                "source_segment_indices": operation.get("source_segment_indices") or [],
-                "query_text": str(query or ""),
-                "graph_query_text": str(query or ""),
-                "source": "visual_operations",
-                "frame_queries_source": "visual_operations",
+                "query_graph_index": query_index,
+                "section_title": str(section.get("title") or ""),
+                "business_frame_text": business_frame_text,
+                "query_graph": section.get("query_graph") or {},
+                "section_start_seconds": section.get("start_seconds"),
+                "section_end_seconds": section.get("end_seconds"),
+                "section_start_time": section.get("start_time"),
+                "section_end_time": section.get("end_time"),
+                "source": "section_query_graph",
                 "frames": [
                     {
                         **frame_ref(job.id, frame),
                         "score": similarities.get((section_index, query_index, int(frame.id)), 0.0),
                         "rank": rank,
                         "matched_query_index": query_index,
-                        "matched_operation_index": query_index,
-                        "matched_operation_text": str(operation.get("operation_text") or query),
-                        "matched_query_text": str(query or ""),
-                        "matched_query_source": "visual_operations",
+                        "matched_query_graph_index": query_index,
+                        "matched_section_title": str(section.get("title") or ""),
+                        "matched_business_frame_text": business_frame_text,
+                        "matched_query_source": "section_query_graph",
+                        **frame_match_detail_payload(
+                            (match_details or {}).get((section_index, query_index, int(frame.id)))
+                        ),
                     }
                     for rank, frame in enumerate(ranked, start=1)
                 ],
             }
         )
     return matches
+
+
+def frame_match_detail_payload(detail: FrameMatchDetail | None) -> dict[str, Any]:
+    if detail is None:
+        return {}
+    return {
+        "matched": detail.matched,
+        "missing": detail.missing,
+        "negative_hits": detail.negative_hits,
+        "objects": detail.objects,
+        "relations": detail.relations,
+        "signals": detail.signals,
+        "quality": detail.quality,
+        "bbox_image": detail.bbox_image_base64,
+        "mask_image": detail.mask_image_base64,
+        "mask_available": detail.mask_available,
+        "match_backend": detail.backend,
+        "devices": detail.devices or {},
+    }
 
 
 def frames_for_section(

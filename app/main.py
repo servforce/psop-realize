@@ -9,11 +9,16 @@ from fastapi import FastAPI
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-from app.api import config, logs, standards, videos, wireframes
+from app.api import config, logs, standard_library, standards, videos, wireframes
 from app.core.config import settings
-from app.jobs.standard_update_scheduler import StandardUpdateScheduler
 from app.db.session import SessionLocal, init_db
+from app.db.standard_library import StandardLibrarySessionLocal, init_standard_library_db
+from app.jobs.standard_library_processing_worker import StandardLibraryProcessingWorker
+from app.jobs.standard_update_scheduler import StandardUpdateScheduler
 from app.services.job_recovery import fail_interrupted_background_jobs
+from app.services.standard_library_atlas import fail_interrupted_standard_library_atlas_jobs
+from app.services.standard_library_index import fail_interrupted_standard_library_index_jobs
+from app.services.standard_library_materialize import fail_interrupted_standard_library_materialize_jobs
 from app.services.storage import storage_service
 
 
@@ -24,10 +29,18 @@ logging.getLogger("app").setLevel(logging.INFO)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
+    init_standard_library_db()
     with SessionLocal() as session:
         counts = fail_interrupted_background_jobs(session)
+    with StandardLibrarySessionLocal() as session:
+        counts.update(fail_interrupted_standard_library_materialize_jobs(session))
+    with StandardLibrarySessionLocal() as session:
+        counts.update(fail_interrupted_standard_library_index_jobs(session))
+    with StandardLibrarySessionLocal() as session:
+        counts.update(fail_interrupted_standard_library_atlas_jobs(session))
     if any(counts.values()):
         logger.warning("marked interrupted background jobs as failed: %s", counts)
+
     scheduler = None
     scheduler_task = None
     if settings.standard_update_scheduler_enabled:
@@ -40,7 +53,25 @@ async def lifespan(app: FastAPI):
     else:
         logger.info("standard update scheduler disabled")
         print("standard update scheduler disabled", flush=True)
+
+    processing_worker = None
+    processing_worker_task = None
+    if settings.standard_library_processing_worker_enabled:
+        processing_worker = StandardLibraryProcessingWorker()
+        processing_worker_task = asyncio.create_task(
+            processing_worker.run_forever(),
+            name="standard-library-processing-worker",
+        )
+        app.state.standard_library_processing_worker = processing_worker
+        app.state.standard_library_processing_worker_task = processing_worker_task
+        logger.info("standard library processing worker enabled")
+        print("standard library processing worker enabled", flush=True)
+    else:
+        logger.info("standard library processing worker disabled")
+        print("standard library processing worker disabled", flush=True)
+
     yield
+
     if scheduler is not None:
         scheduler.stop()
     if scheduler_task is not None:
@@ -51,13 +82,25 @@ async def lifespan(app: FastAPI):
         except Exception:
             logger.exception("standard update scheduler stopped with error")
 
+    if processing_worker is not None:
+        processing_worker.stop()
+    if processing_worker_task is not None:
+        try:
+            await processing_worker_task
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            logger.exception("standard library processing worker stopped with error")
+
 
 def create_app() -> FastAPI:
     init_db()
+    init_standard_library_db()
     app = FastAPI(title="Servforce Material Workbench", version="0.1.0", lifespan=lifespan)
     app.include_router(videos.router)
     app.include_router(wireframes.router)
     app.include_router(standards.router)
+    app.include_router(standard_library.router)
     app.include_router(config.router)
     app.include_router(logs.router)
     app.mount("/static", StaticFiles(directory="static"), name="static")

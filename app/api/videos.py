@@ -13,10 +13,11 @@ from fastapi.responses import PlainTextResponse, Response
 from sqlalchemy import func, select
 
 from app.core.config import settings
-from app.db.session import SessionLocal
-from app.models.entities import VideoFrame, VideoJob
+from app.db.standard_library import StandardLibrarySessionLocal
+from app.models.standard_library import VideoFrame, VideoJob
 from app.services.audit import finish_call, logged_call
 from app.services.storage import storage_service
+from app.services.transcript_tree import render_transcript_tree_text
 from app.services.video_repository import VideoJobRepository
 from app.services.video_parsing import (
     latest_wireframes_for_video,
@@ -40,6 +41,7 @@ from app.services.wireframe_jobs import (
     wireframe_job_to_dict,
 )
 router = APIRouter(prefix="/api/videos", tags=["videos"])
+SEMANTIC_SECTION_FRAME_DISPLAY_LIMIT = 30
 
 SUPPORTED_SUFFIXES = {".mp4", ".mov", ".webm", ".m4v", ".mkv"}
 
@@ -74,7 +76,7 @@ async def upload_video(file: UploadFile = File(...), title: str = Form("")):
             raise HTTPException(status_code=400, detail="上传文件为空")
 
         stored = storage_service.upload_file(object_key=object_key, path=temp_path, media_type=media_type)
-        with SessionLocal() as session:
+        with StandardLibrarySessionLocal() as session:
             with logged_call(
                 session,
                 interface_type="rest",
@@ -100,14 +102,14 @@ async def upload_video(file: UploadFile = File(...), title: str = Form("")):
 
 @router.get("")
 def list_videos():
-    with SessionLocal() as session:
+    with StandardLibrarySessionLocal() as session:
         repo = VideoJobRepository(session)
         return [job_to_dict(item, wireframe_count=count_wireframes(session, item.id)) for item in repo.list_jobs()]
 
 
 @router.get("/{video_id}")
 def get_video(video_id: str):
-    with SessionLocal() as session:
+    with StandardLibrarySessionLocal() as session:
         repo = VideoJobRepository(session)
         job = repo.get_job(video_id)
         if job is None:
@@ -120,7 +122,7 @@ def get_video(video_id: str):
 def parse_video(video_id: str, background_tasks: BackgroundTasks, mode: str = Query("full")):
     if mode not in {"full", "keyframes", "wireframes", "transcript", "markdown"}:
         raise HTTPException(status_code=400, detail="mode must be full, keyframes, wireframes, transcript, or markdown")
-    with SessionLocal() as session:
+    with StandardLibrarySessionLocal() as session:
         with logged_call(
                 session,
                 interface_type="rest",
@@ -189,7 +191,7 @@ def parse_video(video_id: str, background_tasks: BackgroundTasks, mode: str = Qu
 
 
 def run_video_parse_job(video_id: str, mode: str, wireframe_job_id: str | None = None) -> None:
-    with SessionLocal() as session:
+    with StandardLibrarySessionLocal() as session:
         with logged_call(
             session,
             interface_type="background",
@@ -225,7 +227,7 @@ def run_video_parse_job(video_id: str, mode: str, wireframe_job_id: str | None =
 
 @router.get("/{video_id}/frames")
 def list_frames(video_id: str):
-    with SessionLocal() as session:
+    with StandardLibrarySessionLocal() as session:
         repo = VideoJobRepository(session)
         job = repo.get_job(video_id)
         if job is None:
@@ -235,7 +237,7 @@ def list_frames(video_id: str):
 
 @router.get("/{video_id}/semantic-frames")
 def get_semantic_frames(video_id: str):
-    with SessionLocal() as session:
+    with StandardLibrarySessionLocal() as session:
         repo = VideoJobRepository(session)
         job = repo.get_job(video_id)
         if job is None:
@@ -264,13 +266,15 @@ def get_semantic_frames(video_id: str):
                         "index": section.get("index"),
                         "title": section.get("title") or "",
                         "text": section.get("text") or "",
+                        "polished_text": section.get("polished_text") or "",
+                        "business_frame_text": section.get("business_frame_text") or "",
+                        "query_graph": section.get("query_graph") if isinstance(section.get("query_graph"), dict) else {},
                         "start_seconds": section.get("start_seconds"),
                         "end_seconds": section.get("end_seconds"),
                         "start_time": section.get("start_time"),
                         "end_time": section.get("end_time"),
-                        "visual_operations": section.get("visual_operations") if isinstance(section.get("visual_operations"), list) else [],
-                        "frame_query_matches": [],
-                        "raw_frames": frames_in_section(video_id, frames, section),
+                        "query_graph_matches": [],
+                        "raw_frames": frames_in_section(video_id, frames, section)[:SEMANTIC_SECTION_FRAME_DISPLAY_LIMIT],
                         "semantic_frames": [],
                     }
                     for section in sections
@@ -278,7 +282,37 @@ def get_semantic_frames(video_id: str):
                 ],
                 "candidate_frames": [],
             }
+        return limit_semantic_frame_report(report, limit=SEMANTIC_SECTION_FRAME_DISPLAY_LIMIT)
+
+
+def limit_semantic_frame_report(report: dict, *, limit: int) -> dict:
+    if not isinstance(report, dict):
         return report
+    sections = report.get("sections")
+    if not isinstance(sections, list):
+        return report
+    for section in sections:
+        if not isinstance(section, dict):
+            continue
+        for key in ("raw_frames", "candidate_business_frames", "semantic_frames"):
+            items = section.get(key)
+            if isinstance(items, list):
+                section[f"{key}_total"] = len(items)
+                section[key] = items[:limit]
+        matches = section.get("query_graph_matches")
+        if not isinstance(matches, list):
+            continue
+        for match in matches:
+            if not isinstance(match, dict):
+                continue
+            frames = match.get("frames")
+            if isinstance(frames, list):
+                match["frames_total"] = len(frames)
+                match["frames"] = frames[:limit]
+    summary = report.setdefault("summary", {})
+    if isinstance(summary, dict):
+        summary["section_frame_display_limit"] = limit
+    return report
 
 
 @router.get("/{video_id}/frames/{filename}")
@@ -315,7 +349,7 @@ def get_video_wireframe_job(video_id: str, job_id: str):
 
 @router.get("/{video_id}/wireframes")
 def list_wireframes(video_id: str):
-    with SessionLocal() as session:
+    with StandardLibrarySessionLocal() as session:
         repo = VideoJobRepository(session)
         job = repo.get_job(video_id)
         if job is None:
@@ -340,20 +374,27 @@ def list_wireframes(video_id: str):
 
 @router.get("/{video_id}/transcript")
 def get_transcript(video_id: str):
-    with SessionLocal() as session:
+    with StandardLibrarySessionLocal() as session:
         repo = VideoJobRepository(session)
         job = repo.get_job(video_id)
         if job is None:
             raise HTTPException(status_code=404, detail="视频任务不存在")
         if not job.transcript_object_key:
             return {"text": "", "rendered_text": ""}
+        try:
+            tree = json.loads(read_object_text(job.source_bucket, transcript_tree_object_key(video_id)))
+        except Exception:
+            tree = {}
+        if isinstance(tree, dict) and tree:
+            rendered_text = render_transcript_tree_text(tree)
+            return {"text": rendered_text, "rendered_text": rendered_text}
         rendered_key = job.transcript_object_key or transcript_rendered_object_key(video_id)
         rendered_text = read_object_text(job.source_bucket, rendered_key)
         return {"text": rendered_text, "rendered_text": rendered_text}
 
 @router.get("/{video_id}/markdown", response_class=PlainTextResponse)
 def get_markdown(video_id: str):
-    with SessionLocal() as session:
+    with StandardLibrarySessionLocal() as session:
         job = session.get(VideoJob, video_id)
         if job is None:
             raise HTTPException(status_code=404, detail="视频任务不存在")
@@ -546,5 +587,3 @@ def read_object_text(bucket: str, object_key: str | None) -> str:
         return storage_service.get_bytes(bucket=bucket, object_key=object_key).decode("utf-8", errors="replace")
     except Exception:
         return ""
-
-

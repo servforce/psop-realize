@@ -1,15 +1,15 @@
-<!doctype html>
+﻿<!doctype html>
 <html lang="zh-CN">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Servforce Material Workbench</title>
-    <link rel="stylesheet" href="/static/assets/style.css?v=20260807-standard-workbench-ui" />
+    <link rel="stylesheet" href="/static/assets/style.css?v=20260824-sidebar-cleanup-v1" />
   </head>
   <body>
     <aside class="sidebar">
       <div class="brand">Servforce Workbench</div>
-      <button data-view="videos" class="active">视频</button>
+      <button data-view="videos">视频</button>
       <button data-view="standardSearch">标准工作台</button>
       <button data-view="logs">调用记录</button>
     </aside>
@@ -18,8 +18,7 @@
         <h1>材料工作台</h1>
         <p>视频分析、标准检索与产物管理。</p>
       </header>
-
-      <section id="videos" class="view active">
+      <section id="videos" class="view">
         <div class="video-workspace" data-video-view="directory">
           <div class="video-directory-page">
             <div class="video-directory-panel">
@@ -65,70 +64,6 @@
             </div>
             <div id="videoProgressPanel" class="panel video-analysis-panel">
               <div class="empty">请选择视频查看分析进度与产物。</div>
-            </div>
-          </div>
-        </div>
-      </section>
-
-      <section id="standards" class="view">
-        <div class="standard-workspace" data-standard-view="directory">
-          <div class="standard-directory-page">
-            <div class="video-directory-panel">
-              <h2 class="video-panel-title">上传标准</h2>
-              <div class="video-upload standard-upload" id="standardDropZone">
-                <input id="standardFiles" class="hidden" type="file" accept="application/pdf,.pdf" multiple />
-                <svg class="standard-upload-folder" viewBox="0 0 112 78" aria-hidden="true">
-                  <path class="standard-folder-tab" d="M14 18c0-4 3-7 7-7h24c3 0 5 1 7 4l4 5h35c4 0 7 3 7 7v7H14V18Z" />
-                  <path class="standard-folder-body" d="M9 31c0-4 3-7 7-7h80c4 0 7 3 7 7l-6 36c-1 4-4 7-8 7H23c-4 0-7-3-8-7L9 31Z" />
-                  <circle class="standard-folder-plus-bg" cx="56" cy="50" r="17" />
-                  <path class="standard-folder-plus" d="M56 41v18M47 50h18" />
-                </svg>
-                <div class="muted">点击上传，或将标准 PDF 拖拽到此区域</div>
-                <button id="uploadStandards" class="upload-primary" type="button">上传标准 PDF</button>
-              </div>
-              <div id="standardUploadInfo" class="muted">等待上传 PDF。</div>
-              <div class="progress"><div id="standardUploadProgressBar"></div></div>
-              <section class="openstd-crawl-panel">
-                <div class="openstd-crawl-head">
-                  <div>
-                    <h2 class="video-panel-title">国家标准公开系统</h2>
-                    <div class="muted">指导性技术文件 GB/Z 以及可下载 PDF 导入 MinIO。</div>
-                  </div>
-                  <button id="startOpenstdCrawl" class="secondary" type="button">一键爬取国家标准 PDF</button>
-                </div>
-                <div id="openstdCrawlStatus" class="openstd-crawl-status">暂无采集任务。</div>
-                <div class="progress"><div id="openstdCrawlProgressBar"></div></div>
-              </section>
-              <h2 class="video-panel-title standard-directory-title">标准目录</h2>
-              <div class="video-directory-tools">
-                <div class="video-search-box standard-search-box">
-                  <div class="video-search-input-wrap">
-                    <input id="standardDirectorySearch" class="video-search" placeholder="输入标准名称关键词" />
-                    <button id="standardSearchClear" class="search-clear-button hidden" type="button" aria-label="清空搜索">
-                      <svg viewBox="0 0 20 20" aria-hidden="true">
-                        <path d="m6.5 6.5 7 7m0-7-7 7" />
-                      </svg>
-                    </button>
-                  </div>
-                  <button id="standardSearchButton" class="search-icon-button" type="button" aria-label="搜索标准">
-                    <svg viewBox="0 0 24 24" aria-hidden="true">
-                      <circle cx="11" cy="11" r="7" />
-                      <path d="m16.5 16.5 4 4" />
-                    </svg>
-                  </button>
-                </div>
-                <button id="standardLatestUpload" class="secondary sort-button" type="button">按最新时间排序</button>
-              </div>
-              <div id="standardList" class="list video-list standard-list"></div>
-            </div>
-          </div>
-          <div class="standard-detail-page hidden">
-            <div class="standard-detail-titlebar">
-              <button id="backToStandardDirectory" class="secondary standard-back-button" type="button">返回标准目录</button>
-              <h2 class="video-panel-title">标准详情</h2>
-            </div>
-            <div id="standardDetail" class="panel video-analysis-panel standard-detail-panel">
-              <div class="empty">请选择标准查看解析进度与 Markdown 产物。</div>
             </div>
           </div>
         </div>
@@ -181,6 +116,6 @@
         <div id="logList" class="table-wrap"></div>
       </section>
     </main>
-    <script src="/static/assets/app.js?v=20260807-standard-workbench-ui"></script>
+    <script src="/static/assets/app.js?v=20260824-sidebar-cleanup-v1"></script>
   </body>
 </html>
