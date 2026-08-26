@@ -26,10 +26,18 @@ data/*.db
 data/*.sqlite
 data/*.sqlite3
 datasets/
-runs/
+runs/*
+!runs/yolo_world/
+runs/yolo_world/*
+!runs/yolo_world/robot_arm_parts_v1/
+runs/yolo_world/robot_arm_parts_v1/*
+!runs/yolo_world/robot_arm_parts_v1/weights/
+runs/yolo_world/robot_arm_parts_v1/weights/*
 work/
 weights/
+!runs/yolo_world/robot_arm_parts_v1/weights/
 *.pt
+!runs/yolo_world/robot_arm_parts_v1/weights/best.pt
 mobileclip2_b.ts
 .claude/
 

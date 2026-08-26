@@ -11,10 +11,19 @@ __pycache__
 !.env.external.example
 
 datasets
-runs
+runs/*
+!runs/yolo_world/
+runs/yolo_world/*
+!runs/yolo_world/robot_arm_parts_v1/
+runs/yolo_world/robot_arm_parts_v1/*
+!runs/yolo_world/robot_arm_parts_v1/weights/
+runs/yolo_world/robot_arm_parts_v1/weights/*
+!runs/yolo_world/robot_arm_parts_v1/weights/best.pt
 work
 weights
+!runs/yolo_world/robot_arm_parts_v1/weights/
 *.pt
+!runs/yolo_world/robot_arm_parts_v1/weights/best.pt
 *.onnx
 *.engine
 *.ts

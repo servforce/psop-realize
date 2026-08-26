@@ -22,6 +22,7 @@ RUN python -m pip install --upgrade pip \
 COPY app ./app
 COPY static ./static
 COPY tools ./tools
+COPY runs/yolo_world/robot_arm_parts_v1/weights/best.pt ./runs/yolo_world/robot_arm_parts_v1/weights/best.pt
 
 EXPOSE 8090 8100
 
