@@ -10,4 +10,4 @@ pillow>=10.3.0
 imageio-ffmpeg>=0.5.1
 opencv-python-headless>=4.10.0
 ultralytics>=8.3.0
-mcp>=1.2.0
+mcp>=1.2.0,<2
