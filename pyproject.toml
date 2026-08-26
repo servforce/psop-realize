@@ -1,7 +1,7 @@
 [project]
-name = "servforce-material-workbench"
+name = "octopus-video-service"
 version = "0.1.0"
-description = "Web verification workbench for video analysis, standard PDF materialization, MCP tools, and call logs."
+description = "Video analysis API and frontend service."
 requires-python = ">=3.11"
 dependencies = [
   "fastapi>=0.111.0",
@@ -9,19 +9,15 @@ dependencies = [
   "python-multipart>=0.0.9",
   "sqlalchemy>=2.0.30",
   "psycopg[binary]>=3.2.0",
-  "pydantic>=2.7.0",
   "boto3>=1.34.0",
-  "mcp>=1.2.0",
   "pytest>=8.0.0",
   "httpx>=0.27.0",
-  "pypdf>=5.0.0",
-  "requests>=2.32.0",
   "pillow>=10.3.0",
   "imageio-ffmpeg>=0.5.1",
   "opencv-python-headless>=4.10.0",
   "ultralytics>=8.3.0",
+  "mcp>=1.2.0",
 ]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-

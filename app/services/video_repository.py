@@ -6,7 +6,7 @@ from typing import Iterable
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models.standard_library import VideoFrame, VideoJob
+from app.models.video import VideoFrame, VideoJob
 
 
 def now_utc() -> datetime:

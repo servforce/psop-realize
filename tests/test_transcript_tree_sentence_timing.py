@@ -6,7 +6,7 @@ import types
 if importlib.util.find_spec("httpx") is None:
     sys.modules["httpx"] = types.ModuleType("httpx")
 
-from app.models.entities import VideoJob
+from app.models.video import VideoJob
 from app.services.transcript_tree import extract_source_segments, normalize_transcript_tree
 
 

@@ -4,7 +4,7 @@ import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 
-from app.core.config import Settings, settings
+from app.core.storage_config import StorageSettings, storage_settings
 
 
 @dataclass(frozen=True)
@@ -17,7 +17,7 @@ class StoredObject:
 
 
 class StorageService:
-    def __init__(self, settings_: Settings = settings) -> None:
+    def __init__(self, settings_: StorageSettings = storage_settings) -> None:
         self.settings = settings_
         self._client = None
 

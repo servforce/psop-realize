@@ -3,12 +3,12 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
 import httpx
 
-from app.core.config import settings
-from app.models.standard_library import VideoFrame, VideoJob
+from app.core.video_config import video_settings as settings
+from app.models.video import VideoFrame, VideoJob
 from app.services.audit import finish_call, logged_call_with_session
 from app.services.query_graph import QueryGraphError, normalize_query_graph
 from app.services.video_outputs import analysis_proxy_video_object_key
@@ -578,7 +578,56 @@ def attach_media_to_transcript_tree(
     return tree
 
 
-def build_markdown_from_transcript_tree(*, tree: dict[str, Any], source_video_object: str) -> str:
+def attach_semantic_frame_report_to_transcript_tree(*, tree: dict[str, Any], semantic_report: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(semantic_report, dict):
+        return tree
+    body = tree.setdefault("tree", {})
+    sections = body.get("sections")
+    report_sections = semantic_report.get("sections")
+    if not isinstance(sections, list) or not isinstance(report_sections, list):
+        return tree
+
+    report_by_index: dict[int, dict[str, Any]] = {}
+    for position, report_section in enumerate(report_sections, start=1):
+        if not isinstance(report_section, dict):
+            continue
+        try:
+            section_index = int(report_section.get("index") or position)
+        except (TypeError, ValueError):
+            continue
+        report_by_index[section_index] = report_section
+
+    for section in sections:
+        if not isinstance(section, dict):
+            continue
+        try:
+            section_index = int(section.get("index") or 0)
+        except (TypeError, ValueError):
+            continue
+        report_section = report_by_index.get(section_index)
+        if not isinstance(report_section, dict):
+            continue
+        business_frame = business_frame_from_semantic_section(report_section)
+        raw_keyframe = raw_keyframe_from_semantic_section(report_section, business_frame=business_frame)
+        if raw_keyframe:
+            section["raw_keyframe"] = raw_keyframe
+        if business_frame:
+            section["business_frame"] = business_frame
+    return tree
+
+
+def build_markdown_from_transcript_tree(
+    *,
+    tree: dict[str, Any],
+    frame_url: Callable[[dict[str, Any]], str] | None = None,
+    embed_frames: bool = False,
+) -> str:
+    """渲染视频分析 Markdown。每个段落一张分数最高的业务帧。
+
+    frame_url:    把业务帧映射成文档里的链接地址,默认用帧自带的 API url。
+                  自包含导出时传入包内相对路径的解析函数。
+    embed_frames: True 时用 ![]() 内联图片,False 时用 []() 普通链接。
+    """
     video = tree.get("video") or {}
     body = tree.get("tree") or {}
     title = body.get("title") or video.get("title") or "视频分析结果"
@@ -589,63 +638,189 @@ def build_markdown_from_transcript_tree(*, tree: dict[str, Any], source_video_ob
         f'video_title: "{yaml_escape(str(title))}"',
         f'source_filename: "{yaml_escape(str(video.get("filename") or ""))}"',
         f'duration: "{yaml_escape(str(video.get("duration") or ""))}"',
-        f'source_video_object: "{yaml_escape(source_video_object)}"',
-        f'transcript_tree_object: "{yaml_escape(str(tree.get("source", {}).get("tree_object_key") or ""))}"',
         "---",
         "",
-        f"# 视频分析结果：{title}",
+        f"# {title}",
         "",
     ]
     for section in body.get("sections") or []:
-        frames = section.get("frames") or []
-        section_wireframes = section.get("wireframes") or wireframes_from_frames(frames)
         text = str(section.get("text") or "").strip()
         polished_text = str(section.get("polished_text") or "").strip()
-        business_frame_text = transcript_section_business_frame_text(section)
+        business_frame = business_frame_for_markdown(section)
         lines.extend(
             [
                 f"## {section.get('index')}. {section.get('title')}",
                 "",
                 f"**时间范围：** {section.get('start_time')} - {section.get('end_time')}",
                 "",
-                "### 正文",
-                "",
-                text or "未识别。",
-                "",
                 "### 润色后正文",
                 "",
-                polished_text or "未识别。",
+                polished_text or text or "未识别。",
                 "",
-                "### 待匹配文本",
-                "",
-                business_frame_text or "未识别。",
-                "",
-                "### 关键帧",
+                "### 业务帧",
                 "",
             ]
         )
-        if frames:
-            for frame in frames:
-                lines.append(f"- **{frame.get('timestamp_time')}** {frame.get('caption') or '关键帧'}")
-                if frame.get("object_key"):
-                    lines.append(f"  - 路径：{frame.get('object_key')}")
-                if frame.get("url"):
-                    lines.append(f"  - 图片：[关键帧]({frame.get('url')})")
-        else:
-            lines.append("- 无")
-
-        lines.extend(["", "### 线框图", ""])
-        if section_wireframes:
-            for wireframe in section_wireframes:
-                lines.append(f"- **{wireframe.get('timestamp_time')}** 对应关键帧 {wireframe.get('frame_id')}")
-                if wireframe.get("object_key"):
-                    lines.append(f"  - 路径：{wireframe.get('object_key')}")
-                if wireframe.get("url"):
-                    lines.append(f"  - 图片：[线框图]({wireframe.get('url')})")
-        else:
-            lines.append("- 无")
+        append_frame_link(
+            lines,
+            business_frame,
+            label="业务帧",
+            include_score=True,
+            frame_url=frame_url,
+            embed=embed_frames,
+        )
         lines.append("")
     return "\n".join(lines).strip() + "\n"
+
+
+def raw_keyframe_from_semantic_section(
+    section: dict[str, Any] | None,
+    *,
+    business_frame: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    if not isinstance(section, dict):
+        return None
+    raw_keyframes = unique_slim_frames(section.get("raw_frames") or [])
+    if not raw_keyframes:
+        return None
+    if business_frame:
+        matched = matching_frame(raw_keyframes, business_frame)
+        if matched:
+            return matched
+    return raw_keyframes[0]
+
+
+def business_frame_from_semantic_section(section: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(section, dict):
+        return None
+    candidates: list[dict[str, Any]] = []
+    for match in section.get("query_graph_matches") or []:
+        if not isinstance(match, dict):
+            continue
+        candidates.extend(frame for frame in match.get("frames") or [] if isinstance(frame, dict))
+    if not candidates:
+        candidates.extend(frame for frame in section.get("semantic_frames") or [] if isinstance(frame, dict))
+    if not candidates:
+        candidates.extend(frame for frame in section.get("candidate_business_frames") or [] if isinstance(frame, dict))
+    return best_scored_frame(unique_slim_frames(candidates))
+
+
+def raw_keyframe_for_markdown(section: dict[str, Any]) -> dict[str, Any] | None:
+    raw_keyframe = section.get("raw_keyframe")
+    if isinstance(raw_keyframe, dict):
+        return slim_keyframe(raw_keyframe)
+    raw_keyframes = unique_slim_frames(section.get("raw_keyframes") or section.get("frames") or [])
+    business_frame = business_frame_for_markdown(section)
+    if business_frame:
+        matched = matching_frame(raw_keyframes, business_frame)
+        if matched:
+            return matched
+    return raw_keyframes[0] if raw_keyframes else None
+
+
+def business_frame_for_markdown(section: dict[str, Any]) -> dict[str, Any] | None:
+    business_frame = section.get("business_frame")
+    if isinstance(business_frame, dict):
+        return slim_keyframe(business_frame)
+    business_frames = unique_slim_frames(section.get("business_frames") or section.get("semantic_frames") or [])
+    return best_scored_frame(business_frames)
+
+
+def best_scored_frame(frames: list[dict[str, Any]]) -> dict[str, Any] | None:
+    best: dict[str, Any] | None = None
+    best_score: float | None = None
+    for frame in frames:
+        score = numeric_score(frame.get("score"))
+        if score is None:
+            continue
+        if best is None or best_score is None or score > best_score:
+            best = frame
+            best_score = score
+    return best or (frames[0] if frames else None)
+
+
+def matching_frame(frames: list[dict[str, Any]], target: dict[str, Any]) -> dict[str, Any] | None:
+    target_id = target.get("id")
+    target_object_key = target.get("object_key")
+    target_url = target.get("url")
+    for frame in frames:
+        if target_id is not None and frame.get("id") is not None and str(frame.get("id")) == str(target_id):
+            return frame
+        if target_object_key and frame.get("object_key") == target_object_key:
+            return frame
+        if target_url and frame.get("url") == target_url:
+            return frame
+    return None
+
+
+def unique_slim_frames(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        slim = slim_keyframe(candidate)
+        if slim is None:
+            continue
+        key = str(slim.get("id") or slim.get("object_key") or slim.get("url") or "")
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(slim)
+    return result
+
+
+def append_frame_link(
+    lines: list[str],
+    frame: dict[str, Any] | None,
+    *,
+    label: str,
+    include_score: bool,
+    frame_url: Callable[[dict[str, Any]], str] | None = None,
+    embed: bool = False,
+) -> None:
+    if not frame:
+        lines.append("- 无")
+        return
+    time_text = frame.get("timestamp_time") or "未知时间"
+    caption = frame.get("caption") or label
+    url = frame_url(frame) if frame_url is not None else frame.get("url")
+    if url:
+        prefix = "!" if embed else ""
+        lines.append(f"- **{time_text}** {prefix}[{caption}]({url})")
+    else:
+        lines.append(f"- **{time_text}** {caption}")
+    score = numeric_score(frame.get("score"))
+    if include_score and score is not None:
+        lines.append(f"  - 相似度分数：{score:.4f}")
+    # 不输出 object_key,避免暴露存储实现细节
+
+
+def slim_keyframe(frame: dict[str, Any]) -> dict[str, Any] | None:
+    if not isinstance(frame, dict):
+        return None
+    result = {
+        "id": frame.get("id") or frame.get("frame_id"),
+        "timestamp_seconds": frame.get("timestamp_seconds"),
+        "timestamp_time": frame.get("timestamp_time"),
+        "caption": frame.get("caption") or "关键帧",
+        "object_key": frame.get("object_key"),
+        "url": frame.get("url"),
+        "score": frame.get("score"),
+        "rank": frame.get("rank"),
+    }
+    if not any(result.get(key) for key in ("id", "object_key", "url")):
+        return None
+    return result
+
+
+def numeric_score(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def source_indices_are_contiguous(indices: list[int]) -> bool:

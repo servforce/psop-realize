@@ -1,0 +1,7 @@
+services:
+  octopus-api:
+    gpus: all
+    environment:
+      NVIDIA_VISIBLE_DEVICES: ${NVIDIA_VISIBLE_DEVICES:-all}
+      NVIDIA_DRIVER_CAPABILITIES: ${NVIDIA_DRIVER_CAPABILITIES:-compute,utility,video}
+      VIDEO_GRAPH_INDEX_DEVICE: ${VIDEO_GRAPH_INDEX_DEVICE:-cuda}

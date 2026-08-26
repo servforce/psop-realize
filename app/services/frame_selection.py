@@ -10,8 +10,8 @@ import httpx
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.core.config import settings
-from app.models.standard_library import VideoFrame, VideoJob
+from app.core.video_config import video_settings as settings
+from app.models.video import VideoFrame, VideoJob
 from app.services.audit import finish_call, logged_call_with_session
 from app.services.storage import storage_service
 from app.services.transcript_tree import clip_text, extract_chat_content, parse_json_content

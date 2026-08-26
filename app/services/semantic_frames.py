@@ -9,8 +9,8 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Callable
 
-from app.core.config import settings
-from app.models.standard_library import VideoFrame, VideoJob
+from app.core.video_config import video_settings as settings
+from app.models.video import VideoFrame, VideoJob
 from app.services.frame_selection import analyze_image_quality, mark_frame_rejected, mark_frame_selected
 from app.services.query_graph import QueryGraphError, normalize_graph_id, normalize_query_graph, query_graph_prompt_terms
 
@@ -1343,7 +1343,7 @@ def normalize_graph_label(value: Any) -> str:
         return ""
     text = re.sub(r"[^0-9a-z\u4e00-\u9fff]+", " ", text).strip()
     text = " ".join(text.split())
-    return text
+    return TERM_SYNONYMS.get(text) or TERM_SYNONYMS.get(text.replace(" ", "_")) or text
 
 
 def normalize_graph_relation(value: Any) -> str:
@@ -1844,7 +1844,13 @@ def compute_section_frame_match_details_finetuned(
     query_specs: dict[tuple[int, int], dict[str, Any]] = {}
     for section in sections:
         section_index = int(section["index"])
-        for operation in section_query_operations(section):
+        operations = section_query_operations(section)
+        if not operations:
+            try:
+                normalize_query_graph(section.get("query_graph"))
+            except QueryGraphError as exc:
+                raise RuntimeError(str(exc)) from exc
+        for operation in operations:
             query_specs[(section_index, 1)] = build_query_spec(section=section, operation=operation)
 
     all_candidates = unique_candidates(candidates_by_operation)

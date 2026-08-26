@@ -171,9 +171,44 @@ def test_graph_index_match_score_prefers_matching_labels_and_signals():
 
     assert score > 0.5
     assert "servo" in matched
-    assert "base" in matched
+    assert "robot_arm_base" in matched
     assert missing == []
     assert negative_hits == []
+
+
+def test_graph_index_match_score_maps_query_synonyms_to_detection_labels():
+    section = {"index": 1, "title": "安装底座和大臂", "text": "安装底座和大臂"}
+    operation = {
+        "index": 1,
+        "operation_text": "安装底座和大臂",
+        "business_frame_text": "底座旁边放置大臂和舵机",
+        "query_graph": make_query_graph(["底座", "大臂", "舵机"]),
+        "priority": "high",
+    }
+    query_spec = build_query_spec(section=section, operation=operation)
+    graph_index = {
+        "backend": "finetuned_yolo_world_sam",
+        "image": {"size": {"width": 400, "height": 300}},
+        "objects": [
+            {"label": "robot_arm_base", "bbox": [40, 40, 150, 210], "confidence": 0.93, "mask_area_ratio": 0.12},
+            {"label": "upper_arm_link", "bbox": [170, 45, 270, 210], "confidence": 0.91, "mask_area_ratio": 0.10},
+            {"label": "servo", "bbox": [280, 60, 340, 150], "confidence": 0.89, "mask_area_ratio": 0.06},
+        ],
+        "relations": [{"from": "robot_arm_base", "relation": "near", "to": "upper_arm_link", "score": 0.8}],
+        "signals": {"clear_key_region": True, "sharp": True, "not_blurry": True, "detail_rich": True},
+    }
+
+    score, matched, missing, _ = graph_index_match_score(
+        query_spec=query_spec,
+        graph_index=graph_index,
+        quality_score_value=0.8,
+    )
+
+    assert score > 0.5
+    assert "robot_arm_base" in matched
+    assert "upper_arm_link" in matched
+    assert "servo" in matched
+    assert missing == []
 
 
 def test_graph_index_match_score_ignores_tiny_subject_for_overview_frames():

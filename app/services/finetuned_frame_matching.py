@@ -10,7 +10,7 @@ from typing import Any
 
 from PIL import Image, ImageDraw, ImageFont
 
-from app.core.config import settings
+from app.core.video_config import video_settings as settings
 from app.services.semantic_frames import (
     analyze_image_quality,
     build_detection_objects,

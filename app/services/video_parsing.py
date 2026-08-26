@@ -5,13 +5,14 @@ import tempfile
 import traceback
 from pathlib import Path
 
-from app.core.config import settings
-from app.db.standard_library import StandardLibrarySessionLocal
-from app.models.standard_library import VideoFrame, VideoJob
+from app.core.video_config import video_settings as settings
+from app.db.video import VideoSessionLocal
+from app.models.video import VideoFrame, VideoJob
 from app.services.storage import storage_service
 from app.services.video_repository import VideoJobRepository
 from app.services.transcript_tree import (
     attach_media_to_transcript_tree,
+    attach_semantic_frame_report_to_transcript_tree,
     build_markdown_from_transcript_tree,
     build_structured_transcript,
     build_transcript_raw_generation_info,
@@ -86,7 +87,7 @@ def ensure_analysis_video_file(
 
 
 def parse_keyframes(video_id: str, *, finalize: bool = True) -> None:
-    with StandardLibrarySessionLocal() as session:
+    with VideoSessionLocal() as session:
         repo = VideoJobRepository(session)
         job = repo.get_job(video_id)
         if job is None:
@@ -244,7 +245,7 @@ def parse_keyframes(video_id: str, *, finalize: bool = True) -> None:
 
 
 def parse_wireframes(video_id: str, *, wireframe_job_id: str | None = None, finalize: bool = True) -> None:
-    with StandardLibrarySessionLocal() as session:
+    with VideoSessionLocal() as session:
         repo = VideoJobRepository(session)
         job = repo.get_job(video_id)
         if job is None:
@@ -288,7 +289,7 @@ def parse_wireframes(video_id: str, *, wireframe_job_id: str | None = None, fina
 
 
 def parse_transcript(video_id: str, *, finalize: bool = True) -> None:
-    with StandardLibrarySessionLocal() as session:
+    with VideoSessionLocal() as session:
         repo = VideoJobRepository(session)
         job = repo.get_job(video_id)
         if job is None:
@@ -383,7 +384,7 @@ def parse_transcript(video_id: str, *, finalize: bool = True) -> None:
 
 
 def parse_markdown(video_id: str, *, finalize: bool = True) -> None:
-    with StandardLibrarySessionLocal() as session:
+    with VideoSessionLocal() as session:
         repo = VideoJobRepository(session)
         job = repo.get_job(video_id)
         if job is None:
@@ -415,6 +416,17 @@ def parse_markdown(video_id: str, *, finalize: bool = True) -> None:
                 frames=frames,
                 wireframes=wireframes,
             )
+            semantic_report = None
+            try:
+                semantic_report = json.loads(
+                    storage_service.get_bytes(
+                        bucket=job.source_bucket,
+                        object_key=semantic_frame_matches_object_key(video_id),
+                    ).decode("utf-8", errors="replace")
+                )
+            except Exception:
+                semantic_report = None
+            tree = attach_semantic_frame_report_to_transcript_tree(tree=tree, semantic_report=semantic_report)
             storage_service.upload_bytes(
                 object_key=tree_key,
                 content=json.dumps(tree, ensure_ascii=False, indent=2).encode("utf-8"),
@@ -429,10 +441,7 @@ def parse_markdown(video_id: str, *, finalize: bool = True) -> None:
                 bucket=job.source_bucket,
             )
             markdown_key = markdown_object_key(video_id)
-            markdown = build_markdown_from_transcript_tree(
-                tree=tree,
-                source_video_object=job.source_object_key,
-            )
+            markdown = build_markdown_from_transcript_tree(tree=tree)
             storage_service.upload_bytes(
                 object_key=markdown_key,
                 content=markdown.encode("utf-8"),
@@ -471,7 +480,7 @@ def parse_markdown(video_id: str, *, finalize: bool = True) -> None:
 
 
 def parse_transcript(video_id: str, *, finalize: bool = True) -> None:
-    with StandardLibrarySessionLocal() as session:
+    with VideoSessionLocal() as session:
         repo = VideoJobRepository(session)
         job = repo.get_job(video_id)
         if job is None:
@@ -586,7 +595,6 @@ def parse_full(video_id: str) -> None:
     try:
         parse_transcript(video_id, finalize=False)
         parse_keyframes(video_id, finalize=False)
-        parse_wireframes(video_id, finalize=False)
         parse_markdown(video_id, finalize=True)
     except Exception:
         raise

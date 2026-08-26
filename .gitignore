@@ -2,6 +2,8 @@
 .env
 .env.*
 !.env.example
+!.env.full.example
+!.env.external.example
 
 # Python
 __pycache__/
@@ -33,11 +35,9 @@ mobileclip2_b.ts
 
 # Local planning and handoff notes
 meeting-implementation-summary.md
-psop-interface-handoff.md
 需求方案.md
 
 # Logs and temporary files
-tools/standard-collector/logs/
 *.log
 *.tmp
 *.temp

@@ -3,8 +3,8 @@ from __future__ import annotations
 import asyncio
 import logging
 
-from app.core.config import Settings, settings
-from app.db.standard_library import StandardLibrarySessionLocal
+from app.core.video_config import VideoSettings, video_settings
+from app.db.video import VideoSessionLocal
 from app.services.video_repository import VideoJobRepository
 from app.services.videos import VideoJobRunner
 
@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 
 
 class VideoWorker:
-    def __init__(self, settings_: Settings = settings) -> None:
+    def __init__(self, settings_: VideoSettings = video_settings) -> None:
         self.settings = settings_
         self.runner = VideoJobRunner()
         self._stop = asyncio.Event()
@@ -33,7 +33,7 @@ class VideoWorker:
         self._stop.set()
 
     def _claim_next_job_id(self) -> str | None:
-        with StandardLibrarySessionLocal() as session:
+        with VideoSessionLocal() as session:
             repo = VideoJobRepository(session)
             job = repo.claim_next_job()
             return job.id if job else None

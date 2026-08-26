@@ -1,2 +1,2 @@
-"""Core configuration."""
+"""Servforce material workbench."""
 

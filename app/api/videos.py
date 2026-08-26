@@ -12,9 +12,9 @@ from fastapi import APIRouter, BackgroundTasks, File, Form, HTTPException, Query
 from fastapi.responses import PlainTextResponse, Response
 from sqlalchemy import func, select
 
-from app.core.config import settings
-from app.db.standard_library import StandardLibrarySessionLocal
-from app.models.standard_library import VideoFrame, VideoJob
+from app.core.video_config import video_settings as settings
+from app.db.video import VideoSessionLocal
+from app.models.video import VideoFrame, VideoJob
 from app.services.audit import finish_call, logged_call
 from app.services.storage import storage_service
 from app.services.transcript_tree import render_transcript_tree_text
@@ -27,6 +27,7 @@ from app.services.video_parsing import (
     parse_transcript,
     parse_wireframes,
 )
+from app.services.video_export import build_export_package
 from app.services.video_outputs import (
     markdown_object_key,
     semantic_frame_matches_object_key,
@@ -41,7 +42,7 @@ from app.services.wireframe_jobs import (
     wireframe_job_to_dict,
 )
 router = APIRouter(prefix="/api/videos", tags=["videos"])
-SEMANTIC_SECTION_FRAME_DISPLAY_LIMIT = 30
+SEMANTIC_SECTION_FRAME_DISPLAY_LIMIT = 5
 
 SUPPORTED_SUFFIXES = {".mp4", ".mov", ".webm", ".m4v", ".mkv"}
 
@@ -76,7 +77,7 @@ async def upload_video(file: UploadFile = File(...), title: str = Form("")):
             raise HTTPException(status_code=400, detail="上传文件为空")
 
         stored = storage_service.upload_file(object_key=object_key, path=temp_path, media_type=media_type)
-        with StandardLibrarySessionLocal() as session:
+        with VideoSessionLocal() as session:
             with logged_call(
                 session,
                 interface_type="rest",
@@ -102,14 +103,14 @@ async def upload_video(file: UploadFile = File(...), title: str = Form("")):
 
 @router.get("")
 def list_videos():
-    with StandardLibrarySessionLocal() as session:
+    with VideoSessionLocal() as session:
         repo = VideoJobRepository(session)
         return [job_to_dict(item, wireframe_count=count_wireframes(session, item.id)) for item in repo.list_jobs()]
 
 
 @router.get("/{video_id}")
 def get_video(video_id: str):
-    with StandardLibrarySessionLocal() as session:
+    with VideoSessionLocal() as session:
         repo = VideoJobRepository(session)
         job = repo.get_job(video_id)
         if job is None:
@@ -122,7 +123,7 @@ def get_video(video_id: str):
 def parse_video(video_id: str, background_tasks: BackgroundTasks, mode: str = Query("full")):
     if mode not in {"full", "keyframes", "wireframes", "transcript", "markdown"}:
         raise HTTPException(status_code=400, detail="mode must be full, keyframes, wireframes, transcript, or markdown")
-    with StandardLibrarySessionLocal() as session:
+    with VideoSessionLocal() as session:
         with logged_call(
                 session,
                 interface_type="rest",
@@ -191,7 +192,7 @@ def parse_video(video_id: str, background_tasks: BackgroundTasks, mode: str = Qu
 
 
 def run_video_parse_job(video_id: str, mode: str, wireframe_job_id: str | None = None) -> None:
-    with StandardLibrarySessionLocal() as session:
+    with VideoSessionLocal() as session:
         with logged_call(
             session,
             interface_type="background",
@@ -227,7 +228,7 @@ def run_video_parse_job(video_id: str, mode: str, wireframe_job_id: str | None =
 
 @router.get("/{video_id}/frames")
 def list_frames(video_id: str):
-    with StandardLibrarySessionLocal() as session:
+    with VideoSessionLocal() as session:
         repo = VideoJobRepository(session)
         job = repo.get_job(video_id)
         if job is None:
@@ -237,7 +238,7 @@ def list_frames(video_id: str):
 
 @router.get("/{video_id}/semantic-frames")
 def get_semantic_frames(video_id: str):
-    with StandardLibrarySessionLocal() as session:
+    with VideoSessionLocal() as session:
         repo = VideoJobRepository(session)
         job = repo.get_job(video_id)
         if job is None:
@@ -274,6 +275,7 @@ def get_semantic_frames(video_id: str):
                         "start_time": section.get("start_time"),
                         "end_time": section.get("end_time"),
                         "query_graph_matches": [],
+                        "raw_frames_total": len(frames_in_section(video_id, frames, section)),
                         "raw_frames": frames_in_section(video_id, frames, section)[:SEMANTIC_SECTION_FRAME_DISPLAY_LIMIT],
                         "semantic_frames": [],
                     }
@@ -349,7 +351,7 @@ def get_video_wireframe_job(video_id: str, job_id: str):
 
 @router.get("/{video_id}/wireframes")
 def list_wireframes(video_id: str):
-    with StandardLibrarySessionLocal() as session:
+    with VideoSessionLocal() as session:
         repo = VideoJobRepository(session)
         job = repo.get_job(video_id)
         if job is None:
@@ -374,7 +376,7 @@ def list_wireframes(video_id: str):
 
 @router.get("/{video_id}/transcript")
 def get_transcript(video_id: str):
-    with StandardLibrarySessionLocal() as session:
+    with VideoSessionLocal() as session:
         repo = VideoJobRepository(session)
         job = repo.get_job(video_id)
         if job is None:
@@ -392,9 +394,31 @@ def get_transcript(video_id: str):
         rendered_text = read_object_text(job.source_bucket, rendered_key)
         return {"text": rendered_text, "rendered_text": rendered_text}
 
+@router.get("/{video_id}/export")
+def export_video_package(video_id: str):
+    """导出自包含压缩包:result.md + frames/ 业务帧图片 + manifest.json。
+
+    每个段落一张分数最高的业务帧,markdown 用包内相对路径引用,
+    解压即可离线阅读,调用方无需了解底层存储实现。
+    """
+    with VideoSessionLocal() as session:
+        job = session.get(VideoJob, video_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="视频任务不存在")
+        try:
+            content = build_export_package(job)
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"导出打包失败: {exc}") from exc
+        return Response(
+            content=content,
+            media_type="application/zip",
+            headers={"Content-Disposition": f'attachment; filename="video_{video_id}.zip"'},
+        )
+
+
 @router.get("/{video_id}/markdown", response_class=PlainTextResponse)
 def get_markdown(video_id: str):
-    with StandardLibrarySessionLocal() as session:
+    with VideoSessionLocal() as session:
         job = session.get(VideoJob, video_id)
         if job is None:
             raise HTTPException(status_code=404, detail="视频任务不存在")

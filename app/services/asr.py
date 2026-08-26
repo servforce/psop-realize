@@ -7,7 +7,7 @@ from typing import Any
 
 import httpx
 
-from app.core.config import settings
+from app.core.video_config import video_settings as settings
 from app.services.audit import finish_call, logged_call_with_session
 
 

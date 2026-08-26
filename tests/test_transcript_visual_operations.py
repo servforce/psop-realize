@@ -7,7 +7,6 @@ from types import SimpleNamespace
 if importlib.util.find_spec("httpx") is None:
     sys.modules["httpx"] = types.ModuleType("httpx")
 
-from app.core.config import settings
 import app.services.transcript_tree as transcript_tree_module
 from app.services.transcript_tree import (
     build_structured_transcript,
@@ -16,12 +15,6 @@ from app.services.transcript_tree import (
     normalize_transcript_tree,
     render_transcript_tree_text,
 )
-
-
-if not hasattr(settings, "transcript_structure_model"):
-    settings.transcript_structure_model = "test-model"
-if not hasattr(settings, "local_asr_model_label"):
-    settings.local_asr_model_label = "test-asr"
 
 
 def test_normalize_transcript_tree_uses_asr_text_business_text_and_section_query_graph():

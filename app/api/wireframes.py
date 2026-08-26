@@ -4,7 +4,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, File, HTTPException, UploadFile
 
-from app.db.standard_library import StandardLibrarySessionLocal
+from app.db.video import VideoSessionLocal
 from app.services.audit import finish_call, logged_call
 from app.services.wireframes import wireframe_service
 
@@ -21,7 +21,7 @@ async def generate_image_wireframe(file: UploadFile = File(...)):
     content = await file.read()
     if not content:
         raise HTTPException(status_code=400, detail="涓婁紶鍥剧墖涓虹┖")
-    with StandardLibrarySessionLocal() as session:
+    with VideoSessionLocal() as session:
         with logged_call(
             session,
             interface_type="rest",

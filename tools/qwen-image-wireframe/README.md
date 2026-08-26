@@ -1,8 +1,8 @@
 # qwen-image-wireframe
 
-`qwen-image-wireframe` is a PSOP-local reusable CLI tool for converting a reference photo into a clean white-background, black-line technical wireframe by using a domestic Alibaba Cloud Bailian / DashScope image editing model.
+`qwen-image-wireframe` is a project-local reusable CLI tool for converting a reference photo into a clean white-background, black-line technical wireframe by using a domestic Alibaba Cloud Bailian / DashScope image editing model.
 
-This is an asset-generation tool, not a PSOP Skill. It does not define a user-facing Skill, does not compile to EG, and does not own runtime state.
+This is an asset-generation tool. It does not own runtime state and is invoked by the video wireframe API.
 
 ## Model Choice
 
@@ -97,7 +97,7 @@ The tool uses this API key variable:
 DASHSCOPE_API_KEY=<your-bailian-or-dashscope-api-key>
 ```
 
-For local PSOP development, the CLI checks the process environment first, then falls back to the PSOP repo root `.env`, then `backend/.env`.
+For local development, the CLI checks the process environment first, then falls back to the project root `.env`.
 
 ## Usage
 
