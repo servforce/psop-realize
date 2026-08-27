@@ -11,6 +11,13 @@ const state = {
   videoLatestUploadActive: false,
   videoMarkdownView: "rendered",
   activeParseMode: null,
+  activeUploadTaskId: null,
+  activeUploadTaskRevealed: false,
+  activeUploadRequestFailed: false,
+  activeUploadTaskSeen: false,
+  uploadAttemptSequence: 0,
+  activeUploadAttempt: 0,
+  uploadStatusPoll: null,
   videoStatusPoll: null,
   wireframeJobPoll: null,
 };
@@ -84,6 +91,7 @@ function bindVideoControls() {
 }
 
 const SEMANTIC_SECTION_FRAME_DISPLAY_LIMIT = 5;
+const UPLOAD_POLL_MAX_MISSING_AFTER_NETWORK_ERROR = 150;
 
 const stageText = {
   uploaded: "已上传到 MinIO，等待解析",
@@ -112,47 +120,270 @@ async function uploadVideo() {
 }
 
 function uploadFile(file) {
+  const uploadInfo = document.getElementById("uploadInfo");
+  const uploadProgressBar = document.getElementById("uploadProgressBar");
+  let taskId = "";
+  try {
+    taskId = createClientTaskId();
+  } catch (error) {
+    uploadInfo.textContent = `无法创建安全任务 ID：${error.message || error}`;
+    uploadProgressBar.classList.remove("indeterminate");
+    uploadProgressBar.style.width = "0%";
+    return;
+  }
   const form = new FormData();
   form.append("file", file);
   form.append("title", document.getElementById("videoTitle")?.value || file.name);
+  form.append("task_id", taskId);
   const xhr = new XMLHttpRequest();
-  const uploadInfo = document.getElementById("uploadInfo");
-  const uploadProgressBar = document.getElementById("uploadProgressBar");
+  const uploadAttempt = state.uploadAttemptSequence + 1;
+  state.uploadAttemptSequence = uploadAttempt;
+  state.activeUploadAttempt = uploadAttempt;
+  state.activeParseMode = "full";
+  state.activeUploadTaskId = taskId;
+  state.activeUploadTaskRevealed = false;
+  state.activeUploadRequestFailed = false;
+  state.activeUploadTaskSeen = false;
+  stopUploadStatusPolling();
   uploadProgressBar.classList.remove("indeterminate");
   uploadInfo.textContent = `${file.name} · ${formatBytes(file.size)} · 正在上传到服务器`;
   uploadProgressBar.style.width = "2%";
   xhr.upload.onprogress = (event) => {
+    if (state.activeUploadAttempt !== uploadAttempt) return;
     if (!event.lengthComputable) return;
     const percent = Math.max(2, Math.round((event.loaded / event.total) * 100));
     uploadProgressBar.style.width = `${percent}%`;
     if (percent >= 100) {
       uploadProgressBar.classList.add("indeterminate");
-      uploadInfo.textContent = `${file.name} · 服务器已接收，正在保存到 MinIO`;
+      uploadInfo.textContent = `${file.name} · 服务器已接收，正在保存并准备解析`;
     } else {
       uploadInfo.textContent = `${file.name} · ${formatBytes(file.size)} · 上传到服务器 ${percent}%`;
     }
   };
   xhr.onload = async () => {
+    if (state.activeUploadAttempt !== uploadAttempt) return;
+    const payload = parseXhrJson(xhr.responseText);
     if (xhr.status >= 200 && xhr.status < 300) {
-      uploadProgressBar.classList.remove("indeterminate");
-      uploadProgressBar.style.width = "100%";
-      uploadInfo.textContent = `${file.name} · 已保存到 MinIO，等待解析`;
-      const job = JSON.parse(xhr.responseText);
-      await loadVideos();
-      await showVideo(job.id);
+      if (payload?.job) await applyUploadAndParseStatus(payload.job, file.name);
+      if (state.activeUploadAttempt === uploadAttempt) state.activeUploadAttempt = 0;
       return;
     }
+    if (payload?.job) {
+      const finalJob = isVideoTerminal(payload.job)
+        ? payload.job
+        : failedVideoFromPostResponse(payload.job, payload);
+      await applyUploadAndParseStatus(finalJob, file.name);
+      if (state.activeUploadAttempt === uploadAttempt) state.activeUploadAttempt = 0;
+      return;
+    }
+    if (!isDefinitiveUploadRequestFailure(xhr, payload)) {
+      if (state.activeUploadTaskId !== taskId) {
+        // GET polling already observed the terminal state.  A late proxy
+        // 502/504 for the long POST must not regress the completed UI.
+        state.activeUploadAttempt = 0;
+        return;
+      }
+      state.activeUploadRequestFailed = true;
+      uploadProgressBar.classList.add("indeterminate");
+      uploadProgressBar.style.width = "100%";
+      uploadInfo.textContent = state.activeUploadTaskSeen
+        ? `${file.name} · POST 连接已中断，任务仍在运行，正在每 2 秒查询状态`
+        : `${file.name} · POST 响应异常，正在每 2 秒确认服务端是否已创建任务`;
+      return;
+    }
+    stopUploadStatusPolling();
+    state.activeUploadTaskId = null;
+    state.activeUploadTaskRevealed = false;
+    state.activeUploadRequestFailed = false;
+    state.activeUploadTaskSeen = false;
+    state.activeUploadAttempt = 0;
     uploadProgressBar.classList.remove("indeterminate");
     uploadProgressBar.style.width = "0%";
-    uploadInfo.textContent = `上传失败：${xhr.responseText}`;
+    uploadInfo.textContent = `上传失败：${uploadRequestErrorMessage(payload, xhr)}`;
   };
   xhr.onerror = () => {
+    if (state.activeUploadAttempt !== uploadAttempt || state.activeUploadTaskId !== taskId) return;
+    state.activeUploadRequestFailed = true;
+    uploadProgressBar.classList.add("indeterminate");
+    uploadProgressBar.style.width = "100%";
+    uploadInfo.textContent = `${file.name} · POST 连接异常，正在每 2 秒查询任务状态`;
+  };
+  xhr.open("POST", "/api/videos/upload-and-parse");
+  xhr.send(form);
+  startUploadAndParsePolling(taskId, file.name, uploadAttempt);
+}
+
+function createClientTaskId() {
+  if (typeof window.crypto?.randomUUID === "function") {
+    return window.crypto.randomUUID().replace(/-/g, "").toLowerCase();
+  }
+  const bytes = new Uint8Array(16);
+  if (typeof window.crypto?.getRandomValues !== "function") {
+    throw new Error("当前浏览器不支持 Web Crypto");
+  }
+  window.crypto.getRandomValues(bytes);
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  return Array.from(bytes, (value) => value.toString(16).padStart(2, "0")).join("");
+}
+
+function parseXhrJson(value) {
+  try {
+    return JSON.parse(value || "{}");
+  } catch (_error) {
+    return null;
+  }
+}
+
+function uploadRequestErrorMessage(payload, xhr) {
+  if (xhr.status === 409) return "任务 ID 冲突，请重新上传";
+  if (typeof payload?.detail === "string" && payload.detail) return payload.detail;
+  return payload?.error?.message || xhr.responseText || "未知错误";
+}
+
+function isDefinitiveUploadRequestFailure(xhr, payload) {
+  if (xhr.status >= 400 && xhr.status < 500 && ![408, 425, 429].includes(xhr.status)) return true;
+  return payload?.error?.code === "VIDEO_UPLOAD_FAILED";
+}
+
+function failedVideoFromPostResponse(job, payload) {
+  return {
+    ...job,
+    status: "failed",
+    current_stage: "failed",
+    progress_percent: 100,
+    error_message: payload?.error?.message || "视频解析失败",
+    updated_at: new Date().toISOString(),
+  };
+}
+
+function startUploadAndParsePolling(taskId, filename, uploadAttempt) {
+  stopUploadStatusPolling();
+  let taskSeen = false;
+  let missingAfterNetworkError = 0;
+  const poll = async () => {
+    if (state.activeUploadAttempt !== uploadAttempt || state.activeUploadTaskId !== taskId) return;
+    let continuePolling = true;
+    try {
+      const response = await fetch(`/api/videos/${encodeURIComponent(taskId)}`, { cache: "no-store" });
+      if (response.status === 404) {
+        if (state.activeUploadRequestFailed && !taskSeen) {
+          missingAfterNetworkError += 1;
+          if (missingAfterNetworkError >= UPLOAD_POLL_MAX_MISSING_AFTER_NETWORK_ERROR) {
+            continuePolling = false;
+            stopUnregisteredUploadTask(taskId, filename, uploadAttempt);
+          }
+        }
+        return;
+      }
+      if (!response.ok) throw new Error(await response.text());
+      const video = await response.json();
+      taskSeen = true;
+      state.activeUploadTaskSeen = true;
+      missingAfterNetworkError = 0;
+      await applyUploadAndParseStatus(video, filename);
+      continuePolling = !isVideoTerminal(video);
+    } catch (error) {
+      console.warn("failed to poll upload-and-parse task", error);
+      if (state.activeUploadRequestFailed && !taskSeen) {
+        missingAfterNetworkError += 1;
+        if (missingAfterNetworkError >= UPLOAD_POLL_MAX_MISSING_AFTER_NETWORK_ERROR) {
+          continuePolling = false;
+          stopUnregisteredUploadTask(taskId, filename, uploadAttempt);
+        }
+      }
+    } finally {
+      if (
+        continuePolling
+        && state.activeUploadAttempt === uploadAttempt
+        && state.activeUploadTaskId === taskId
+      ) {
+        state.uploadStatusPoll = setTimeout(poll, 2000);
+      }
+    }
+  };
+  state.uploadStatusPoll = setTimeout(poll, 0);
+}
+
+async function applyUploadAndParseStatus(video, filename) {
+  if (!video?.id) return;
+  const isActiveUpload = state.activeUploadTaskId === video.id;
+  const shouldReveal = isActiveUpload && !state.activeUploadTaskRevealed;
+  if (!updateVideoInState(video)) return;
+  renderVideoList();
+  if (shouldReveal) {
+    state.activeUploadTaskRevealed = true;
+    state.selectedVideoId = video.id;
+    setVideoWorkspaceView("analysis");
+    renderVideoShell(video);
+  }
+  if (state.selectedVideoId === video.id) updateVideoProgress(video);
+
+  const uploadInfo = document.getElementById("uploadInfo");
+  const uploadProgressBar = document.getElementById("uploadProgressBar");
+  if (!isVideoTerminal(video)) {
+    if (isActiveUpload && uploadInfo) {
+      uploadInfo.textContent = `${filename} · ${statusLabel(video)} · ${videoProgressLabel(video)}`;
+    }
+    if (isActiveUpload && uploadProgressBar) {
+      uploadProgressBar.classList.add("indeterminate");
+      uploadProgressBar.style.width = "100%";
+    }
+    return;
+  }
+
+  if (isActiveUpload) {
+    stopUploadStatusPolling();
+    state.activeUploadTaskId = null;
+    state.activeUploadRequestFailed = false;
+    state.activeUploadTaskSeen = false;
+    if (uploadProgressBar) {
+      uploadProgressBar.classList.remove("indeterminate");
+      uploadProgressBar.style.width = video.status === "failed" ? "0%" : "100%";
+    }
+    if (uploadInfo) {
+      uploadInfo.textContent = video.status === "failed"
+        ? `${filename} · 解析失败`
+        : `${filename} · 上传和解析已全部完成`;
+    }
+  }
+  if (state.selectedVideoId === video.id) {
+    renderVideoShell(video);
+    updateVideoProgress(video);
+    if (video.status !== "failed") applyParseCompletionMessage("full", video);
+    await loadActiveVideoTab(video.id);
+  }
+  await loadVideos();
+}
+
+function stopUnregisteredUploadTask(taskId, filename, uploadAttempt) {
+  if (state.activeUploadAttempt !== uploadAttempt || state.activeUploadTaskId !== taskId) return;
+  stopUploadStatusPolling();
+  state.activeUploadTaskId = null;
+  state.activeUploadTaskRevealed = false;
+  state.activeUploadRequestFailed = false;
+  state.activeUploadTaskSeen = false;
+  state.activeUploadAttempt = 0;
+  const uploadInfo = document.getElementById("uploadInfo");
+  const uploadProgressBar = document.getElementById("uploadProgressBar");
+  if (uploadInfo) uploadInfo.textContent = `${filename} · 连接失败且服务端未创建任务，请重新上传`;
+  if (uploadProgressBar) {
     uploadProgressBar.classList.remove("indeterminate");
     uploadProgressBar.style.width = "0%";
-    uploadInfo.textContent = "上传失败：网络错误";
-  };
-  xhr.open("POST", "/api/videos");
-  xhr.send(form);
+  }
+}
+
+function stopUploadStatusPolling() {
+  if (state.uploadStatusPoll) clearTimeout(state.uploadStatusPoll);
+  state.uploadStatusPoll = null;
+}
+
+function stopVideoStatusPolling() {
+  if (state.videoStatusPoll) {
+    clearTimeout(state.videoStatusPoll);
+    clearInterval(state.videoStatusPoll);
+  }
+  state.videoStatusPoll = null;
 }
 
 async function loadVideos() {
@@ -846,13 +1077,31 @@ function applyParseCompletionMessage(mode, video) {
 }
 
 function updateVideoInState(video) {
+  if (!video?.id) return false;
   const index = state.videos.findIndex((item) => item.id === video.id);
-  if (index >= 0) state.videos[index] = video;
-  else state.videos.unshift(video);
+  if (index >= 0) {
+    if (shouldIgnoreVideoUpdate(state.videos[index], video)) return false;
+    state.videos[index] = video;
+  } else {
+    state.videos.unshift(video);
+  }
+  return true;
+}
+
+function shouldIgnoreVideoUpdate(existing, incoming) {
+  const existingTerminal = isVideoTerminal(existing);
+  const incomingTerminal = isVideoTerminal(incoming);
+  const existingTime = parseBackendDateAsUtc(existing?.updated_at).getTime();
+  const incomingTime = parseBackendDateAsUtc(incoming?.updated_at).getTime();
+  if (Number.isFinite(existingTime) && Number.isFinite(incomingTime)) {
+    if (incomingTime < existingTime) return true;
+    if (incomingTime > existingTime) return false;
+  }
+  return existingTerminal && !incomingTerminal;
 }
 
 function startVideoStatusPolling(id) {
-  if (state.videoStatusPoll) clearInterval(state.videoStatusPoll);
+  stopVideoStatusPolling();
   let timer = null;
   const poll = async () => {
     if (state.selectedVideoId !== id) {
@@ -861,21 +1110,25 @@ function startVideoStatusPolling(id) {
       return;
     }
     const video = await fetchJson(`/api/videos/${id}`).catch(() => null);
-    if (!video) return;
-    updateVideoInState(video);
+    if (!video || state.selectedVideoId !== id) return;
+    const accepted = updateVideoInState(video);
+    const currentVideo = accepted
+      ? video
+      : state.videos.find((item) => item.id === video.id) || video;
     renderVideoList();
-    updateVideoProgress(video);
-    if (!isVideoTaskIndeterminate(video)) {
+    updateVideoProgress(currentVideo);
+    if (isVideoTerminal(currentVideo)) {
       if (timer) clearInterval(timer);
       state.videoStatusPoll = null;
-      renderVideoShell(video);
-      applyParseCompletionMessage(state.activeParseMode, video);
+      renderVideoShell(currentVideo);
+      updateVideoProgress(currentVideo);
+      if (currentVideo.status !== "failed") applyParseCompletionMessage(state.activeParseMode, currentVideo);
       await refreshWireframeJob(id);
       await loadActiveVideoTab(id);
     }
   };
   poll();
-  timer = setInterval(poll, 1000);
+  timer = setInterval(poll, 2000);
   state.videoStatusPoll = timer;
 }
 
@@ -1268,6 +1521,10 @@ function statusLabel(task) {
 
 function isVideoTaskIndeterminate(task) {
   return ["queued", "processing"].includes(task?.status);
+}
+
+function isVideoTerminal(task) {
+  return ["completed", "completed_with_warnings", "failed"].includes(task?.status);
 }
 
 function videoProgressLabel(task) {

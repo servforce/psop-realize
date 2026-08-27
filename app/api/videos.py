@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import tempfile
@@ -9,8 +10,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import APIRouter, BackgroundTasks, File, Form, HTTPException, Query, UploadFile
-from fastapi.responses import PlainTextResponse, Response
+from fastapi.responses import JSONResponse, PlainTextResponse, Response
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
+from starlette.concurrency import run_in_threadpool
 
 from app.core.video_config import video_settings as settings
 from app.db.video import VideoSessionLocal
@@ -42,21 +45,144 @@ from app.services.wireframe_jobs import (
     wireframe_job_to_dict,
 )
 router = APIRouter(prefix="/api/videos", tags=["videos"])
+logger = logging.getLogger(__name__)
 SEMANTIC_SECTION_FRAME_DISPLAY_LIMIT = 5
 
 SUPPORTED_SUFFIXES = {".mp4", ".mov", ".webm", ".m4v", ".mkv"}
+CLIENT_TASK_ID_PATTERN = re.compile(r"^[0-9a-f]{32}$")
 
 
 @router.post("")
 async def upload_video(file: UploadFile = File(...), title: str = Form("")):
+    return await _store_uploaded_video(
+        file=file,
+        title=title,
+        endpoint="POST /api/videos",
+    )
+
+
+@router.post("/upload-and-parse")
+async def upload_and_parse_video(
+    file: UploadFile = File(...),
+    title: str = Form(""),
+    task_id: str | None = Form(None),
+):
+    """Upload a video, run the full parser, and respond only after parsing ends.
+
+    The HTTP connection intentionally remains open for the whole upload and parse
+    workflow.  The synchronous parser runs in Starlette's thread pool so this
+    long-lived request does not block the FastAPI event loop.
+    """
+    requested_video_id = validate_client_task_id(task_id) if task_id is not None else None
+    try:
+        uploaded = await _store_uploaded_video(
+            file=file,
+            title=title,
+            endpoint="POST /api/videos/upload-and-parse",
+            requested_video_id=requested_video_id,
+        )
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("video upload or job creation failed")
+        return JSONResponse(
+            status_code=500,
+            content={
+                "video_id": None,
+                "mode": "full",
+                "success": False,
+                "status": "failed",
+                "job": None,
+                "error": {
+                    "code": "VIDEO_UPLOAD_FAILED",
+                    "message": "视频上传或任务创建失败",
+                },
+            },
+        )
+
+    video_id = str(uploaded["id"])
+    # Persist the ownership of this combined request before queueing blocking
+    # parser work.  Startup recovery can then turn an interrupted request into
+    # `failed`; plain `/api/videos` uploads intentionally remain `uploaded`.
+    with VideoSessionLocal() as session:
+        VideoJobRepository(session).update_job(
+            video_id,
+            status="processing",
+            stage="transcribing_asr",
+            progress=5,
+            error_message="",
+        )
+
+    parse_error: Exception | None = None
+    try:
+        await run_in_threadpool(run_video_parse_job, video_id, "full")
+    except Exception as exc:
+        parse_error = exc
+        logger.exception("full video parse failed: video_id=%s", video_id)
+
+    job_payload = _get_video_job_payload(video_id)
+    if job_payload.get("status") not in {
+        "completed",
+        "completed_with_warnings",
+        "failed",
+    }:
+        # The normal parsers persist a terminal status themselves.  Keep the
+        # API contract terminal even if a wrapper returns/raises before that
+        # update, otherwise GET polling would never finish.
+        with VideoSessionLocal() as session:
+            VideoJobRepository(session).update_job(
+                video_id,
+                status="failed",
+                stage="failed",
+                progress=100,
+                error_message="视频解析失败",
+                completed=True,
+            )
+        job_payload = _get_video_job_payload(video_id)
+    success = job_payload.get("status") in {"completed", "completed_with_warnings"}
+    public_error = "" if success else _public_parse_error(job_payload.get("error_message"), parse_error)
+    job_payload["error_message"] = public_error
+    result = {
+        "video_id": video_id,
+        "mode": "full",
+        "success": success,
+        "status": job_payload.get("status"),
+        "job": job_payload,
+        "error": None
+        if success
+        else {
+            "code": "VIDEO_PARSE_FAILED",
+            "message": public_error or "视频解析未正常完成",
+        },
+    }
+    if success:
+        return result
+    return JSONResponse(status_code=500, content=result)
+
+
+async def _store_uploaded_video(
+    *,
+    file: UploadFile,
+    title: str,
+    endpoint: str,
+    requested_video_id: str | None = None,
+) -> dict:
     filename = safe_filename(file.filename or "video.mp4")
     suffix = Path(filename).suffix.lower()
     if suffix not in SUPPORTED_SUFFIXES:
         raise HTTPException(status_code=400, detail=f"不支持的视频格式: {suffix or 'unknown'}")
 
-    video_id = uuid.uuid4().hex
+    video_id = requested_video_id or uuid.uuid4().hex
+    if requested_video_id is not None:
+        with VideoSessionLocal() as session:
+            if session.get(VideoJob, video_id) is not None:
+                raise HTTPException(status_code=409, detail="task_id 已存在，请为本次任务生成新的 UUID")
     media_type = file.content_type or media_type_for_suffix(suffix)
-    object_key = f"videos/{video_id}/source/{filename}"
+    # Client-provided IDs can race before the database insert.  A per-attempt
+    # object name prevents the losing request from overwriting the winner's
+    # source object even though the primary-key insert will later return 409.
+    source_filename = f"{uuid.uuid4().hex}_{filename}" if requested_video_id is not None else filename
+    object_key = f"videos/{video_id}/source/{source_filename}"
     workdir = Path(settings.video_workdir)
     workdir.mkdir(parents=True, exist_ok=True)
     fd, temp_name = tempfile.mkstemp(prefix=f"upload_{video_id}_", suffix=suffix, dir=str(workdir))
@@ -76,29 +202,39 @@ async def upload_video(file: UploadFile = File(...), title: str = Form("")):
         if size <= 0:
             raise HTTPException(status_code=400, detail="上传文件为空")
 
-        stored = storage_service.upload_file(object_key=object_key, path=temp_path, media_type=media_type)
+        stored = await run_in_threadpool(
+            storage_service.upload_file,
+            object_key=object_key,
+            path=temp_path,
+            media_type=media_type,
+        )
         with VideoSessionLocal() as session:
             with logged_call(
                 session,
                 interface_type="rest",
-                tool_or_endpoint="POST /api/videos",
+                tool_or_endpoint=endpoint,
                 request={"filename": filename, "size_bytes": size},
             ) as call_id:
                 repo = VideoJobRepository(session)
-                job = repo.create_job(
-                    video_id=video_id,
-                    title=title.strip() or Path(filename).stem,
-                    filename=filename,
-                    content_type=media_type,
-                    size_bytes=size,
-                    source_bucket=stored.bucket,
-                    source_object_key=stored.object_key,
-                )
+                try:
+                    job = repo.create_job(
+                        video_id=video_id,
+                        title=title.strip() or Path(filename).stem,
+                        filename=filename,
+                        content_type=media_type,
+                        size_bytes=size,
+                        source_bucket=stored.bucket,
+                        source_object_key=stored.object_key,
+                    )
+                except IntegrityError as exc:
+                    session.rollback()
+                    raise HTTPException(status_code=409, detail="task_id 已存在，请为本次任务生成新的 UUID") from exc
                 payload = job_to_dict(job)
                 payload["call_id"] = call_id
                 return payload
     finally:
         temp_path.unlink(missing_ok=True)
+        await file.close()
 
 
 @router.get("")
@@ -110,6 +246,10 @@ def list_videos():
 
 @router.get("/{video_id}")
 def get_video(video_id: str):
+    return _get_video_job_payload(video_id)
+
+
+def _get_video_job_payload(video_id: str) -> dict:
     with VideoSessionLocal() as session:
         repo = VideoJobRepository(session)
         job = repo.get_job(video_id)
@@ -117,6 +257,23 @@ def get_video(video_id: str):
             raise HTTPException(status_code=404, detail="视频任务不存在")
         payload = job_to_dict(job, wireframe_count=count_wireframes(session, video_id))
         return payload
+
+
+def _public_parse_error(error_message: object, parse_error: Exception | None) -> str:
+    """Return a stable public message without exposing internal exception text."""
+    if str(error_message or "").strip() or parse_error is not None:
+        return "视频解析失败"
+    return ""
+
+
+def validate_client_task_id(value: str) -> str:
+    """Require the exact UUID v4 hex value the client will later use for GET."""
+    if not CLIENT_TASK_ID_PATTERN.fullmatch(value):
+        raise HTTPException(status_code=400, detail="task_id 必须是 32 位小写 UUID v4 hex 字符串")
+    parsed = uuid.UUID(hex=value)
+    if parsed.version != 4 or parsed.hex != value:
+        raise HTTPException(status_code=400, detail="task_id 必须是 32 位小写 UUID v4 hex 字符串")
+    return value
 
 
 @router.post("/{video_id}/parse")
@@ -457,6 +614,9 @@ def count_wireframes(session, video_id: str) -> int:
 
 
 def job_to_dict(job: VideoJob, *, wireframe_count: int = 0) -> dict:
+    public_error_message = job.error_message or ""
+    if job.status == "failed":
+        public_error_message = "视频解析失败"
     return {
         "id": job.id,
         "title": job.title,
@@ -469,7 +629,7 @@ def job_to_dict(job: VideoJob, *, wireframe_count: int = 0) -> dict:
         "stage_processed": job.stage_processed,
         "stage_total": job.stage_total,
         "stage_message": job.stage_message or "",
-        "error_message": job.error_message or "",
+        "error_message": public_error_message,
         "duration_ms": job.duration_ms,
         "frame_count": job.frame_count,
         "wireframe_count": wireframe_count,
