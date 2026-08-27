@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+import logging
+
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
 
 from app.core.video_config import video_settings as settings
+
+
+logger = logging.getLogger(__name__)
 
 
 class VideoBase(DeclarativeBase):
@@ -12,6 +17,7 @@ class VideoBase(DeclarativeBase):
 
 video_engine = create_engine(
     settings.video_database_url,
+    connect_args={"connect_timeout": 10},
     pool_pre_ping=True,
     pool_size=10,
     max_overflow=20,
@@ -71,5 +77,8 @@ def _migrate_video_tables() -> None:
         "CREATE INDEX IF NOT EXISTS idx_video_usage_records_created_at ON video_usage_records (created_at)",
     ]
     with video_engine.begin() as connection:
+        connection.execute(text("SET LOCAL lock_timeout = '5s'"))
+        connection.execute(text("SET LOCAL statement_timeout = '60s'"))
         for statement in statements:
+            logger.info("running video DB migration: %s", " ".join(statement.split()))
             connection.execute(text(statement))

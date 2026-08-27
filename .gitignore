@@ -49,6 +49,7 @@ meeting-implementation-summary.md
 *.log
 *.tmp
 *.temp
+*.part
 
 # OS and editor files
 .DS_Store

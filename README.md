@@ -223,16 +223,10 @@ python -m pip install -r requirements.txt
 copy .env.example .env
 ```
 
-根据本机环境修改 `.env`，然后启动视频 API：
+根据本机环境修改 `.env`，然后启动服务。该命令会同时启动视频 API 和 MCP Server：
 
 ```powershell
-.\run.ps1
-```
-
-再打开一个终端启动 MCP Server：
-
-```powershell
-.\run_mcp.ps1
+.\scripts\run.ps1
 ```
 
 访问 Web 页面：
@@ -270,16 +264,10 @@ python -m pip install -r requirements.txt
 cp .env.example .env
 ```
 
-根据本机环境修改 `.env`，然后启动视频 API：
+根据本机环境修改 `.env`，然后启动服务。该命令会同时启动视频 API 和 MCP Server：
 
 ```bash
-./run.sh
-```
-
-再打开一个终端启动 MCP Server：
-
-```bash
-./run_mcp.sh
+./scripts/run.sh
 ```
 
 访问：
@@ -293,7 +281,7 @@ http://127.0.0.1:8100/health
 如果脚本没有执行权限：
 
 ```bash
-chmod +x run.sh run_mcp.sh
+chmod +x scripts/run.sh
 ```
 
 ## Docker 部署方式一：完整一键部署
@@ -504,6 +492,7 @@ app/
 static/
 tests/
 tools/
+scripts/
 runs/
 work/
 Dockerfile
@@ -512,10 +501,6 @@ docker-compose.external.yml
 docker-compose.gpu.yml
 requirements.txt
 pyproject.toml
-run.ps1
-run.sh
-run_mcp.ps1
-run_mcp.sh
 ```
 
 目录和文件作用：
@@ -533,6 +518,7 @@ run_mcp.sh
 - `static/`：前端页面、CSS、JavaScript。
 - `tests/`：测试代码。
 - `tools/`：训练和辅助脚本。
+- `scripts/`：本地启动和运维脚本。
 - `runs/yolo_world/robot_arm_parts_v1/weights/best.pt`：随仓库提供的微调 YOLO 模型。
 - `work/`：运行时临时文件目录，不提交 Git。
 - `Dockerfile`：构建 Octopus 应用镜像。
@@ -544,8 +530,7 @@ run_mcp.sh
 - `.env.external.example`：外部数据库和 MinIO 部署配置模板。
 - `requirements.txt`：Python 依赖。
 - `pyproject.toml`：Python 项目信息和依赖。
-- `run.ps1` / `run.sh`：本地启动视频 API。
-- `run_mcp.ps1` / `run_mcp.sh`：本地启动 MCP Server。
+- `scripts/run.ps1` / `scripts/run.sh`：本地统一启动视频 API 和 MCP Server。
 
 ## 上传 GitHub 注意事项
 
