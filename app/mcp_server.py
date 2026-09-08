@@ -25,13 +25,13 @@ DEFAULT_MCP_HOST = "0.0.0.0"
 DEFAULT_MCP_PORT = 8100
 DEFAULT_MCP_PATH = "/mcp"
 
-mcp = FastMCP("octopus-video", stateless_http=True, json_response=True)
-mcp.settings.streamable_http_path = os.getenv("OCTOPUS_MCP_PATH", DEFAULT_MCP_PATH)
+mcp = FastMCP("psop-realize", stateless_http=True, json_response=True)
+mcp.settings.streamable_http_path = os.getenv("PSOP_REALIZE_MCP_PATH", DEFAULT_MCP_PATH)
 
 
 class BearerTokenMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
-        expected = os.getenv("OCTOPUS_MCP_BEARER_TOKEN", "").strip()
+        expected = os.getenv("PSOP_REALIZE_MCP_BEARER_TOKEN", "").strip()
         if not expected or request.url.path == "/health":
             return await call_next(request)
         actual = request.headers.get("authorization", "")
@@ -41,7 +41,7 @@ class BearerTokenMiddleware(BaseHTTPMiddleware):
 
 
 async def health(_request: Request) -> JSONResponse:
-    return JSONResponse({"ok": True, "app": "octopus-video-mcp"})
+    return JSONResponse({"ok": True, "app": "psop-realize-mcp"})
 
 
 @contextlib.asynccontextmanager
@@ -236,11 +236,11 @@ def read_upload_input(
 
 
 def normalized_base_url(value: str = "") -> str:
-    return (value or os.getenv("OCTOPUS_VIDEO_API_BASE_URL") or DEFAULT_API_BASE_URL).rstrip("/")
+    return (value or os.getenv("PSOP_REALIZE_VIDEO_API_BASE_URL") or DEFAULT_API_BASE_URL).rstrip("/")
 
 
 def public_base_url(fallback: str) -> str:
-    return (os.getenv("OCTOPUS_VIDEO_PUBLIC_BASE_URL") or fallback).rstrip("/")
+    return (os.getenv("PSOP_REALIZE_VIDEO_PUBLIC_BASE_URL") or fallback).rstrip("/")
 
 
 def guess_media_type(filename: str, *, default: str) -> str:
@@ -292,7 +292,7 @@ app = create_mcp_app()
 
 
 if __name__ == "__main__":
-    transport = os.getenv("OCTOPUS_MCP_TRANSPORT", "streamable-http")
+    transport = os.getenv("PSOP_REALIZE_MCP_TRANSPORT", "streamable-http")
     if transport == "stdio":
         mcp.run(transport="stdio")
     else:
@@ -300,6 +300,6 @@ if __name__ == "__main__":
 
         uvicorn.run(
             "app.mcp_server:app",
-            host=os.getenv("OCTOPUS_MCP_HOST", DEFAULT_MCP_HOST),
-            port=int(os.getenv("OCTOPUS_MCP_PORT", str(DEFAULT_MCP_PORT))),
+            host=os.getenv("PSOP_REALIZE_MCP_HOST", DEFAULT_MCP_HOST),
+            port=int(os.getenv("PSOP_REALIZE_MCP_PORT", str(DEFAULT_MCP_PORT))),
         )

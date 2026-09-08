@@ -11,9 +11,9 @@ fi
 export PYTHONPATH="$PWD"
 export PYTHONUNBUFFERED=1
 
-API_HOST="${OCTOPUS_API_HOST:-0.0.0.0}"
-API_PORT="${OCTOPUS_API_PORT:-8090}"
-MCP_URL="http://${OCTOPUS_MCP_HOST:-0.0.0.0}:${OCTOPUS_MCP_PORT:-8100}${OCTOPUS_MCP_PATH:-/mcp}"
+API_HOST="${PSOP_REALIZE_API_HOST:-0.0.0.0}"
+API_PORT="${PSOP_REALIZE_API_PORT:-8090}"
+MCP_URL="http://${PSOP_REALIZE_MCP_HOST:-0.0.0.0}:${PSOP_REALIZE_MCP_PORT:-8100}${PSOP_REALIZE_MCP_PATH:-/mcp}"
 
 PYTHON_BIN="${PYTHON:-}"
 if [ -z "$PYTHON_BIN" ]; then
@@ -58,20 +58,20 @@ wait_for_api() {
     fi
     sleep 1
   done
-  echo "Octopus Video API did not become healthy at $url" >&2
+  echo "psop-realize Video API did not become healthy at $url" >&2
   return 1
 }
 
 trap cleanup EXIT INT TERM
 
-echo "Starting Octopus Video API with $PYTHON_BIN on http://${API_HOST}:${API_PORT}"
+echo "Starting psop-realize Video API with $PYTHON_BIN on http://${API_HOST}:${API_PORT}"
 "$PYTHON_BIN" -m uvicorn app.video_main:app --host "$API_HOST" --port "$API_PORT" --log-level info &
 api_pid=$!
 
 wait_for_api
 
-export OCTOPUS_VIDEO_API_BASE_URL="${OCTOPUS_VIDEO_API_BASE_URL:-http://127.0.0.1:${API_PORT}}"
-echo "Starting Octopus MCP Server on $MCP_URL"
+export PSOP_REALIZE_VIDEO_API_BASE_URL="${PSOP_REALIZE_VIDEO_API_BASE_URL:-http://127.0.0.1:${API_PORT}}"
+echo "Starting psop-realize MCP Server on $MCP_URL"
 "$PYTHON_BIN" -m app.mcp_server &
 mcp_pid=$!
 

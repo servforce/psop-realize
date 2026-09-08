@@ -1,5 +1,5 @@
 [project]
-name = "octopus-video-service"
+name = "psop-realize"
 version = "0.1.0"
 description = "Video analysis API and frontend service."
 requires-python = ">=3.11"

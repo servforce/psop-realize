@@ -1,5 +1,5 @@
 services:
-  octopus-api:
+  psop-realize-api:
     gpus: all
     environment:
       NVIDIA_VISIBLE_DEVICES: ${NVIDIA_VISIBLE_DEVICES:-all}

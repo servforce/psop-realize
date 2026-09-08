@@ -18,17 +18,17 @@ Import-DotEnv ".env"
 $env:PYTHONPATH = $root
 $env:PYTHONUNBUFFERED = "1"
 
-$apiHost = if ($env:OCTOPUS_API_HOST) { $env:OCTOPUS_API_HOST } else { "127.0.0.1" }
-$apiPort = if ($env:OCTOPUS_API_PORT) { $env:OCTOPUS_API_PORT } else { "8090" }
-if (-not $env:OCTOPUS_VIDEO_API_BASE_URL) {
-  $env:OCTOPUS_VIDEO_API_BASE_URL = "http://127.0.0.1:$apiPort"
+$apiHost = if ($env:PSOP_REALIZE_API_HOST) { $env:PSOP_REALIZE_API_HOST } else { "127.0.0.1" }
+$apiPort = if ($env:PSOP_REALIZE_API_PORT) { $env:PSOP_REALIZE_API_PORT } else { "8090" }
+if (-not $env:PSOP_REALIZE_VIDEO_API_BASE_URL) {
+  $env:PSOP_REALIZE_VIDEO_API_BASE_URL = "http://127.0.0.1:$apiPort"
 }
 
 $apiProcess = $null
 $mcpProcess = $null
 
 try {
-  Write-Host "Starting Octopus Video API on http://$apiHost`:$apiPort"
+  Write-Host "Starting psop-realize Video API on http://$apiHost`:$apiPort"
   $apiProcess = Start-Process python `
     -ArgumentList @("-m", "uvicorn", "app.video_main:app", "--host", $apiHost, "--port", $apiPort, "--log-level", "info") `
     -NoNewWindow `
@@ -38,7 +38,7 @@ try {
   $ready = $false
   for ($i = 0; $i -lt 60; $i++) {
     if ($apiProcess.HasExited) {
-      throw "Octopus Video API exited before becoming healthy."
+      throw "psop-realize Video API exited before becoming healthy."
     }
     try {
       Invoke-WebRequest -Uri $healthUrl -UseBasicParsing -TimeoutSec 2 | Out-Null
@@ -49,14 +49,14 @@ try {
     }
   }
   if (-not $ready) {
-    throw "Octopus Video API did not become healthy at $healthUrl"
+    throw "psop-realize Video API did not become healthy at $healthUrl"
   }
 
-  $mcpHost = if ($env:OCTOPUS_MCP_HOST) { $env:OCTOPUS_MCP_HOST } else { "0.0.0.0" }
-  $mcpPort = if ($env:OCTOPUS_MCP_PORT) { $env:OCTOPUS_MCP_PORT } else { "8100" }
-  $mcpPath = if ($env:OCTOPUS_MCP_PATH) { $env:OCTOPUS_MCP_PATH } else { "/mcp" }
+  $mcpHost = if ($env:PSOP_REALIZE_MCP_HOST) { $env:PSOP_REALIZE_MCP_HOST } else { "0.0.0.0" }
+  $mcpPort = if ($env:PSOP_REALIZE_MCP_PORT) { $env:PSOP_REALIZE_MCP_PORT } else { "8100" }
+  $mcpPath = if ($env:PSOP_REALIZE_MCP_PATH) { $env:PSOP_REALIZE_MCP_PATH } else { "/mcp" }
 
-  Write-Host "Starting Octopus MCP Server on http://$mcpHost`:$mcpPort$mcpPath"
+  Write-Host "Starting psop-realize MCP Server on http://$mcpHost`:$mcpPort$mcpPath"
   $mcpProcess = Start-Process python `
     -ArgumentList @("-m", "app.mcp_server") `
     -NoNewWindow `

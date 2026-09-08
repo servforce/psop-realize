@@ -1,6 +1,6 @@
-# Octopus 数据集与模型训练工具
+# psop-realize 数据集与模型训练工具
 
-`tools/` 目录包含 Octopus 的离线辅助工具。本文件重点说明如何构造待标注图片集、使用 Label Studio 完成目标检测标注、整理导出的 YOLO 数据集，以及训练 YOLOv8s-World 模型。
+`tools/` 目录包含 psop-realize 的离线辅助工具。本文件重点说明如何构造待标注图片集、使用 Label Studio 完成目标检测标注、整理导出的 YOLO 数据集，以及训练 YOLOv8s-World 模型。
 
 ## 两个核心脚本
 
@@ -28,13 +28,13 @@
   -> 生成 data.yaml
   -> train_yolov8s_world.py 训练 YOLOv8s-World
   -> 在验证集和真实业务图片上评估 best.pt
-  -> 将确认可用的 best.pt 配置到 Octopus
+  -> 将确认可用的 best.pt 配置到 psop-realize
 ```
 
-以下命令默认从 Octopus 仓库根目录执行：
+以下命令默认从 psop-realize 仓库根目录执行：
 
 ```bash
-cd /opt/Octopus
+cd /opt/psop-realize
 ```
 
 ## 第一步：构造待标注图片集
@@ -370,15 +370,15 @@ PY
 - 小目标、遮挡、低光和复杂背景下是否稳定；
 - 新模型是否确实优于当前生产模型。
 
-## 第八步：将模型用于 Octopus
+## 第八步：将模型用于 psop-realize
 
-确认模型可用后，将 Octopus 配置指向新的 `best.pt`：
+确认模型可用后，将 psop-realize 配置指向新的 `best.pt`：
 
 ```text
 VIDEO_GRAPH_INDEX_FINETUNED_YOLO_WORLD_MODEL=runs/yolo_world/robot_arm_parts_v2/weights/best.pt
 ```
 
-如果 Octopus 运行在 Docker 中，容器内必须能够访问该文件，并且配置应使用容器内路径，例如：
+如果 psop-realize 运行在 Docker 中，容器内必须能够访问该文件，并且配置应使用容器内路径，例如：
 
 ```text
 VIDEO_GRAPH_INDEX_FINETUNED_YOLO_WORLD_MODEL=/app/runs/yolo_world/robot_arm_parts_v2/weights/best.pt

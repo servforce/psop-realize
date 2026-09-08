@@ -1,8 +1,8 @@
-# Octopus 视频理解与业务帧抽取服务
+# psop-realize 视频理解与业务帧抽取服务
 
 ## 项目介绍
 
-Octopus 是一套面向**操作类、培训类和工业场景视频**的视频理解与内容整理服务。它将视频中的语音、画面和时间信息关联起来，把一段较长、难以快速检索的视频，转换为结构化转写、业务帧、图文 Markdown 和可供其他系统继续处理的 JSON 数据。
+psop-realize 是一套面向**操作类、培训类和工业场景视频**的视频理解与内容整理服务。它将视频中的语音、画面和时间信息关联起来，把一段较长、难以快速检索的视频，转换为结构化转写、业务帧、图文 Markdown 和可供其他系统继续处理的 JSON 数据。
 
 这里的“业务帧”不是简单地按固定时间间隔截取的普通关键帧，而是指**最能说明某个业务步骤、操作动作或讲解段落的画面**。系统会结合转写文本、段落时间范围、目标检测结果、mask、目标位置关系和图像质量，对候选画面进行过滤、去重、匹配和排序，从而为每个业务段落找到更有说明价值的图片。
 
@@ -38,7 +38,7 @@ Octopus 是一套面向**操作类、培训类和工业场景视频**的视频�
 
 ### 当前适用边界
 
-- Octopus 聚焦离线或异步的视频内容分析与结果服务，不提供视频剪辑、通用媒体管理、实时视频监控或实时告警能力。
+- psop-realize 聚焦离线或异步的视频内容分析与结果服务，不提供视频剪辑、通用媒体管理、实时视频监控或实时告警能力。
 - 仓库自带的微调 YOLO-World 模型主要识别机械臂装配相关零部件；迁移到其他业务领域时，需要准备相应的检测模型、类别和查询图规则。
 - 完整解析依赖 PostgreSQL、MinIO、FFmpeg、本地 ASR、Qwen 模型服务以及 YOLO + SAM；目标检测与分割建议使用 GPU。
 
@@ -56,15 +56,15 @@ Octopus 是一套面向**操作类、培训类和工业场景视频**的视频�
 
 ```text
 外部 MCP 客户端
-  -> Octopus MCP Server /mcp
-  -> Octopus Video API
+  -> psop-realize MCP Server /mcp
+  -> psop-realize Video API
   -> PostgreSQL / MinIO / 本地 ASR / Qwen 模型 / YOLO + SAM
 ```
 
 服务分为两层：
 
-- `octopus-api`：真正执行业务逻辑的视频分析服务，默认端口 `8090`。
-- `octopus-mcp`：远程 MCP 服务，把视频服务的 HTTP API 封装成 MCP 工具，默认端口 `8100`，默认路径 `/mcp`。
+- `psop-realize-api`：真正执行业务逻辑的视频分析服务，默认端口 `8090`。
+- `psop-realize-mcp`：远程 MCP 服务，把视频服务的 HTTP API 封装成 MCP 工具，默认端口 `8100`，默认路径 `/mcp`。
 
 ## 功能说明
 
@@ -239,7 +239,7 @@ detect_image_objects_and_mask
 如果配置了鉴权：
 
 ```text
-OCTOPUS_MCP_BEARER_TOKEN=your-token
+PSOP_REALIZE_MCP_BEARER_TOKEN=your-token
 ```
 
 外部客户端需要带请求头：
@@ -334,8 +334,8 @@ chmod +x scripts/run.sh
 
 - PostgreSQL
 - MinIO
-- Octopus Video API
-- Octopus MCP Server
+- psop-realize Video API
+- psop-realize MCP Server
 
 准备配置：
 
@@ -360,8 +360,8 @@ docker compose ps
 查看日志：
 
 ```bash
-docker compose logs -f octopus-api
-docker compose logs -f octopus-mcp
+docker compose logs -f psop-realize-api
+docker compose logs -f psop-realize-mcp
 ```
 
 默认端口：
@@ -378,8 +378,8 @@ Postgres:  服务器IP:5432
 
 适合你们已经有 PostgreSQL 和 MinIO 的环境。该方式只启动：
 
-- Octopus Video API
-- Octopus MCP Server
+- psop-realize Video API
+- psop-realize MCP Server
 
 准备配置：
 
@@ -406,8 +406,8 @@ docker compose -f docker-compose.external.yml up -d --build
 查看日志：
 
 ```bash
-docker compose -f docker-compose.external.yml logs -f octopus-api
-docker compose -f docker-compose.external.yml logs -f octopus-mcp
+docker compose -f docker-compose.external.yml logs -f psop-realize-api
+docker compose -f docker-compose.external.yml logs -f psop-realize-mcp
 ```
 
 ## GPU 部署
@@ -457,7 +457,7 @@ models/sam2.1_b.pt
 Docker 默认挂载：
 
 ```text
-OCTOPUS_MODEL_DIR=./models
+PSOP_REALIZE_MODEL_DIR=./models
 VIDEO_GRAPH_INDEX_MOBILE_SAM_MODEL=/models/sam2.1_b.pt
 ```
 
@@ -467,13 +467,13 @@ VIDEO_GRAPH_INDEX_MOBILE_SAM_MODEL=/models/sam2.1_b.pt
 
 ```text
 APP_ENV=prod
-OCTOPUS_VIDEO_PUBLIC_BASE_URL=http://服务器IP:8090
-OCTOPUS_MCP_PORT=8100
-OCTOPUS_MCP_PATH=/mcp
-OCTOPUS_MCP_BEARER_TOKEN=
+PSOP_REALIZE_VIDEO_PUBLIC_BASE_URL=http://服务器IP:8090
+PSOP_REALIZE_MCP_PORT=8100
+PSOP_REALIZE_MCP_PATH=/mcp
+PSOP_REALIZE_MCP_BEARER_TOKEN=
 ```
 
-`OCTOPUS_VIDEO_PUBLIC_BASE_URL` 很重要。MCP 返回图片 URL 和 JSON URL 时会使用这个地址。如果部署给外部客户端访问，不要使用 `127.0.0.1`。
+`PSOP_REALIZE_VIDEO_PUBLIC_BASE_URL` 很重要。MCP 返回图片 URL 和 JSON URL 时会使用这个地址。如果部署给外部客户端访问，不要使用 `127.0.0.1`。
 
 ### 数据库
 
@@ -565,7 +565,7 @@ pyproject.toml
 - `scripts/`：本地启动和运维脚本。
 - `runs/yolo_world/robot_arm_parts_v1/weights/best.pt`：随仓库提供的微调 YOLO 模型。
 - `work/`：运行时临时文件目录，不提交 Git。
-- `Dockerfile`：构建 Octopus 应用镜像。
+- `Dockerfile`：构建 psop-realize 应用镜像。
 - `docker-compose.yml`：完整一键部署，包含数据库和 MinIO。
 - `docker-compose.external.yml`：只部署应用，使用外部数据库和 MinIO。
 - `docker-compose.gpu.yml`：GPU 部署覆盖配置。
@@ -612,7 +612,7 @@ http://服务器IP:8100/health
 ```json
 {
   "mcpServers": {
-    "octopus-video": {
+    "psop-realize": {
       "type": "streamable-http",
       "url": "http://服务器IP:8100/mcp",
       "headers": {
@@ -623,15 +623,15 @@ http://服务器IP:8100/health
 }
 ```
 
-如果没有配置 `OCTOPUS_MCP_BEARER_TOKEN`，可以去掉 `headers`。
+如果没有配置 `PSOP_REALIZE_MCP_BEARER_TOKEN`，可以去掉 `headers`。
 
 ### 只启动 MCP Server 可以吗？
 
 不可以。MCP Server 只是包装层，真正的业务由 Video API 执行。远程 MCP 调用需要同时运行：
 
 ```text
-octopus-api
-octopus-mcp
+psop-realize-api
+psop-realize-mcp
 ```
 
 ### 为什么 Docker 还要挂载 `models/sam2.1_b.pt`？
