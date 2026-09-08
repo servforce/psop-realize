@@ -1,5 +1,6 @@
 services:
   psop-realize-api:
+    restart: unless-stopped
     build: .
     image: psop-realize:latest
     extra_hosts:
@@ -79,6 +80,7 @@ services:
       retries: 10
 
   psop-realize-mcp:
+    restart: unless-stopped
     build: .
     image: psop-realize:latest
     depends_on:

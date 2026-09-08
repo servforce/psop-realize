@@ -1,5 +1,6 @@
 services:
   postgres:
+    restart: unless-stopped
     image: postgres:16-alpine
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-octopus_video}
@@ -16,6 +17,7 @@ services:
       retries: 10
 
   minio:
+    restart: unless-stopped
     image: minio/minio:RELEASE.2025-07-23T15-54-02Z
     command: server /data --console-address ":9001"
     environment:
@@ -33,6 +35,7 @@ services:
       retries: 10
 
   psop-realize-api:
+    restart: unless-stopped
     build: .
     image: psop-realize:latest
     extra_hosts:
@@ -117,6 +120,7 @@ services:
       retries: 10
 
   psop-realize-mcp:
+    restart: unless-stopped
     build: .
     image: psop-realize:latest
     depends_on:
