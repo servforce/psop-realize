@@ -7,7 +7,7 @@ import pytest
 
 NODE = shutil.which("node")
 RUNTIME_HARNESS = Path("tests/js/video_app_runtime_harness.cjs")
-FRONTEND_SCRIPT = Path("static/assets/video-app.js")
+FRONTEND_SCRIPT = Path("static/assets/js/services/upload.js")
 
 
 @pytest.mark.skipif(NODE is None, reason="Node.js is required for frontend runtime tests")
@@ -18,6 +18,11 @@ FRONTEND_SCRIPT = Path("static/assets/video-app.js")
         "reparse-update",
         "late-504",
         "collision-409",
+        "collision-inflight",
+        "temporary-404",
+        "post-failed-job",
+        "network-timeout",
+        "disposed-response",
     ],
 )
 def test_video_upload_polling_runtime_scenarios(scenario):

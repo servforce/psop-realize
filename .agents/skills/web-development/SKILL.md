@@ -37,13 +37,13 @@ description: PSOP 项目前端开发规范与流程。用于 static/ 下的页�
 - Tailwind 构建链（固定版本）
   - tailwindcss：4.1.18
   - @tailwindcss/postcss：4.1.18
-  - postcss：8.5.6
+  - postcss：8.5.28
   - autoprefixer：10.4.23
 - 前端运行时依赖（本地加载）
   - alpinejs：3.15.3
   - codemirror：^6.0.2
   - lightweight-charts：^5.1.0
-  - plotly.js：^3.3.1
+  - Plotly（官方 Basic 分发包 `plotly.js-basic-dist-min`）：^3.3.1
 - 图标与字体（本地资源，不走 NPM）
   - Material Symbols（Outlined/Rounded/Sharp）：`assets/css/material-symbols.css` + `assets/fonts/material-symbols-*.woff2`
 

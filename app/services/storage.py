@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -85,6 +86,26 @@ class StorageService:
 
     def url_for(self, object_key: str) -> str:
         return f"/api/objects/{object_key}"
+
+    def delete_video_objects(self, *, bucket: str, video_id: str) -> None:
+        """Delete only this video's exact namespace, including paginated artifacts."""
+        if not bucket or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", video_id):
+            raise ValueError("A bucket and a safe video ID are required")
+        self._ensure_minio_backend()
+        client = self._get_client()
+        prefix = f"videos/{video_id}/"
+        pages = client.get_paginator("list_objects_v2").paginate(Bucket=bucket, Prefix=prefix)
+        for page in pages:
+            keys = [item["Key"] for item in page.get("Contents", [])]
+            if any(not key.startswith(prefix) for key in keys):
+                raise ValueError("Object listing escaped the video namespace")
+            for offset in range(0, len(keys), 1000):
+                result = client.delete_objects(
+                    Bucket=bucket,
+                    Delete={"Objects": [{"Key": key} for key in keys[offset:offset + 1000]], "Quiet": True},
+                )
+                if result.get("Errors"):
+                    raise RuntimeError("Video object deletion was incomplete")
 
     def _ensure_minio_backend(self) -> None:
         if self.settings.storage_backend != "minio":

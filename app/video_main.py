@@ -4,10 +4,10 @@ import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
-from fastapi.responses import FileResponse, Response
-from fastapi.staticfiles import StaticFiles
+from fastapi.responses import Response
+from app.frontend import mount_frontend
 
-from app.api import semantic_frames, usage, videos, wireframes
+from app.api import semantic_frames, usage, videos
 from app.core.video_config import video_settings as settings
 from app.db.video import init_video_db
 from app.services.storage import storage_service
@@ -31,20 +31,9 @@ def create_app() -> FastAPI:
     init_video_db()
     app = FastAPI(title="Servforce Video Service", version="0.1.0", lifespan=lifespan)
     app.include_router(videos.router)
-    app.include_router(wireframes.router)
     app.include_router(semantic_frames.router)
     app.include_router(usage.router)
-    app.mount("/static", StaticFiles(directory="static"), name="static")
-
-    @app.get("/")
-    def index():
-        return FileResponse(
-            "static/video.html",
-            headers={
-                "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
-                "Pragma": "no-cache",
-            },
-        )
+    mount_frontend(app)
 
     @app.get("/api/objects/{object_key:path}")
     def object_proxy(object_key: str):

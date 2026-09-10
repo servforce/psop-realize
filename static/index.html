@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="zh-CN" class="dark">
+<head>
+  <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+  <base href="/">
+  <title>PSOP Realize</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="assets/css/material-symbols.css">
+  <link rel="stylesheet" href="assets/css/style.compiled.css">
+  <script type="module" src="assets/js/init-alpine.js">
+</script>
+</head>
+<body class="bg-slate-950 text-sm text-slate-200 antialiased">
+  <div x-data="frame" class="h-dvh overflow-hidden flex" @keydown.escape.window="mobileOpen = false">
+    <button x-cloak x-show="mobileOpen" class="fixed inset-0 z-20 bg-black/60 md:hidden" @click="mobileOpen = false" aria-label="关闭导航遮罩">
+</button>
+    <aside id="sidebar" class="sidebar h-full shrink-0 flex flex-col overflow-hidden border-r border-slate-800 bg-slate-950" :class="[collapsed ? 'sidebar-collapsed' : '', mobileOpen ? 'sidebar-open' : '']">
+      <a href="/videos" @click.prevent="go('/videos')" class="h-14 shrink-0 flex items-center gap-2 px-4 border-b border-slate-800" aria-label="PSOP Realize 首页" title="PSOP Realize">
+        <span class="brand-mark" aria-hidden="true"><span class="material-symbols-rounded">schema</span></span>
+        <span x-show="!collapsed || mobileOpen" class="font-semibold whitespace-nowrap">PSOP <span class="font-normal text-slate-300">Realize</span></span>
+      </a>
+      <nav class="flex-1 min-h-0 overflow-y-auto px-2 py-3" aria-label="主导航">
+        <template x-for="item in menuItems" :key="item.key">
+          <a :href="item.path" @click.prevent="go(item.path)" class="nav-item" :class="active === item.key ? 'nav-active' : ''" :aria-current="active === item.key ? 'page' : null" :title="item.label" :aria-label="item.label">
+            <span class="material-symbols-rounded" aria-hidden="true" x-text="item.icon">
+</span>
+            <span x-show="!collapsed || mobileOpen" x-text="item.label">
+</span>
+            <span x-show="item.key === 'videos' && $store.app.upload.busy" class="ml-auto h-1.5 w-1.5 shrink-0 rounded-full bg-sky-400" aria-label="任务进行中">
+</span>
+          </a>
+        </template>
+      </nav>
+    </aside>
+    <div class="flex-1 min-w-0 min-h-0 overflow-hidden flex flex-col">
+      <header class="h-14 shrink-0 border-b border-slate-800 bg-slate-950/70 px-4 flex items-center gap-3">
+        <button class="icon-button md:hidden" @click="mobileOpen = !mobileOpen" aria-label="展开导航" aria-controls="sidebar" :aria-expanded="mobileOpen">
+<span class="material-symbols-rounded" aria-hidden="true">menu</span>
+</button>
+        <button class="icon-button hidden md:inline-flex" @click="toggleSidebar()" :aria-label="collapsed ? '展开侧栏' : '折叠侧栏'" aria-controls="sidebar" :aria-expanded="!collapsed">
+          <span class="material-symbols-rounded" aria-hidden="true">side_navigation</span>
+        </button>
+        <span class="hidden sm:inline text-slate-400">工作空间</span>
+<span class="hidden sm:inline text-slate-500">/</span>
+        <h1 class="font-medium truncate" x-text="title">
+</h1>
+        <button class="ml-auto flex items-center gap-2 text-xs text-slate-400 shrink-0" @click="$store.app.checkHealth()" title="点击重新检查服务连接">
+          <span class="h-1.5 w-1.5 rounded-full" :class="$store.app.health === 'online' ? 'bg-emerald-400' : $store.app.health === 'offline' ? 'bg-rose-400' : 'bg-amber-400'">
+</span>
+          <span x-text="$store.app.health === 'online' ? '服务已连接' : $store.app.health === 'offline' ? '服务未连接' : '正在连接'">
+</span>
+        </button>
+      </header>
+      <main id="main-content" tabindex="-1" class="relative flex-1 min-h-0 overflow-hidden flex flex-col" :aria-busy="loading">
+        <div x-show="loading" class="absolute inset-0 z-10 bg-slate-950 p-6" role="status">
+<div class="skeleton w-48 h-6 mb-6">
+</div>
+<div class="skeleton h-14 mb-3">
+</div>
+<div class="skeleton h-14">
+</div>
+<span class="sr-only">正在加载页面</span>
+</div>
+        <div x-show="error" x-cloak class="empty-state" role="alert">
+<span class="material-symbols-rounded text-rose-300" aria-hidden="true">error</span>
+<p x-text="error">
+</p>
+<button class="btn-secondary" @click="load(location.pathname)">重新加载</button>
+</div>
+        <div x-ref="page" class="h-full min-h-0 flex flex-col" x-show="!error">
+</div>
+      </main>
+    </div>
+    <dialog id="upload-drawer" x-data="uploadDrawer" class="upload-drawer" :class="closing ? 'is-closing' : ''"
+      @click="if ($event.target === $el) close()" @cancel.prevent="close()" @close="afterClose()" @keydown.tab="trapFocus($event)"
+      aria-labelledby="upload-drawer-title" aria-describedby="upload-drawer-description">
+      <div class="h-full min-h-0 flex flex-col">
+        <header class="page-heading shrink-0">
+          <div class="min-w-0">
+            <h2 id="upload-drawer-title">上传视频</h2>
+            <p id="upload-drawer-description">上传操作视频，自动生成转写、业务帧与 Markdown。</p>
+          </div>
+          <button class="icon-button shrink-0" @click="close()" aria-label="关闭上传抽屉" autofocus>
+            <span class="material-symbols-rounded" aria-hidden="true">close</span>
+          </button>
+        </header>
+        <div x-show="loading" class="p-4" role="status">
+          <div class="skeleton h-10 mb-4"></div>
+          <div class="skeleton h-48"></div>
+          <span class="sr-only">正在加载上传表单</span>
+        </div>
+        <div x-show="error" x-cloak class="empty-state" role="alert">
+          <span class="material-symbols-rounded text-rose-300" aria-hidden="true">cloud_off</span>
+          <p x-text="error"></p>
+          <button class="btn-secondary" @click="load()">重新加载上传表单</button>
+        </div>
+        <div x-ref="content" x-show="loaded" class="flex-1 min-h-0 flex flex-col"></div>
+      </div>
+    </dialog>
+    <dialog id="image-preview" class="image-dialog" @click="if ($event.target === $el) $store.app.closePreview()" @cancel.prevent="$store.app.closePreview()" aria-label="业务帧预览">
+      <div class="flex items-center justify-between border-b border-slate-800 px-4 py-3">
+<h2>图像预览</h2>
+<button class="icon-button" @click="$store.app.closePreview()" aria-label="关闭图像预览">
+<span class="material-symbols-rounded" aria-hidden="true">close</span>
+</button>
+</div>
+      <img :src="$store.app.image || undefined" alt="业务帧或分割标注预览" class="max-h-[80dvh] max-w-full mx-auto object-contain">
+    </dialog>
+    <div x-show="$store.app.toast" x-transition.opacity x-cloak class="toast" :class="$store.app.toastError ? 'text-rose-200' : 'text-emerald-200'" role="status" x-text="$store.app.toast">
+</div>
+  </div>
+  <noscript>
+<p>此工作台需要启用 JavaScript。</p>
+</noscript>
+</body>
+</html>

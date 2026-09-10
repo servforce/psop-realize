@@ -56,7 +56,6 @@ def test_normalize_transcript_tree_uses_asr_text_business_text_and_section_query
         job=job,
         source_segments=source_segments,
         frames=[],
-        wireframes=[],
         duration_ms=5000,
     )
 
@@ -170,7 +169,6 @@ def test_build_structured_transcript_retries_invalid_query_graph(monkeypatch):
         job=job,
         raw_response=raw_response,
         frames=[],
-        wireframes=[],
         duration_ms=1000,
     )
 

@@ -417,7 +417,3 @@ VIDEO_GRAPH_INDEX_FINETUNED_YOLO_WORLD_MODEL=/app/runs/yolo_world/robot_arm_part
 ### 为什么没有 `test` 目录
 
 当前数据处理脚本只实现了 `train/val` 拆分。训练时用 `train`，训练过程和模型选择用 `val`；如果需要正式独立测试集，必须额外保留或扩展脚本。
-
-## 其他工具
-
-- `qwen-image-wireframe/`：由视频线框图 API 调用的图片转线框图辅助工具，具体说明见 [`qwen-image-wireframe/README.md`](qwen-image-wireframe/README.md)。

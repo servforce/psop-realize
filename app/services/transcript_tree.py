@@ -64,7 +64,6 @@ def build_structured_transcript(
     job: VideoJob,
     raw_response: dict[str, Any] | None,
     frames: list[VideoFrame],
-    wireframes: list[dict[str, Any]],
     duration_ms: int,
 ) -> TranscriptBuildResult:
     source_segments = extract_source_segments(raw_response or {}, duration_ms=duration_ms)
@@ -83,7 +82,6 @@ def build_structured_transcript(
                 job=job,
                 source_segments=source_segments,
                 frames=frames,
-                wireframes=wireframes,
                 duration_ms=duration_ms,
             )
             break
@@ -364,7 +362,6 @@ def normalize_transcript_tree(
     job: VideoJob,
     source_segments: list[dict[str, Any]],
     frames: list[VideoFrame],
-    wireframes: list[dict[str, Any]],
     duration_ms: int,
 ) -> dict[str, Any]:
     title = str(tree.get("title") or job.title or job.filename or job.id).strip()
@@ -454,18 +451,15 @@ def normalize_transcript_tree(
         raise RuntimeError("Qwen transcript structuring did not produce any transcript sections")
 
     sections = ensure_section_ranges(sections, duration_seconds)
-    if frames or wireframes:
-        wireframe_lookup = map_wireframes_by_frame_ref(wireframes)
+    if frames:
         for section in sections:
             section_frames = frames_for_section(
                 video_id=job.id,
                 frames=frames,
-                wireframe_lookup=wireframe_lookup,
                 start=float(section["start_seconds"]),
                 end=float(section["end_seconds"]),
             )
             section["frames"] = section_frames
-            section["wireframes"] = wireframes_from_frames(section_frames)
 
     return {
         "version": "2.2",
@@ -550,13 +544,11 @@ def attach_media_to_transcript_tree(
     tree: dict[str, Any],
     video_id: str,
     frames: list[VideoFrame],
-    wireframes: list[dict[str, Any]],
 ) -> dict[str, Any]:
     body = tree.setdefault("tree", {})
     sections = body.get("sections")
     if not isinstance(sections, list):
         return tree
-    wireframe_lookup = map_wireframes_by_frame_ref(wireframes)
     for section in sections:
         if not isinstance(section, dict):
             continue
@@ -569,12 +561,10 @@ def attach_media_to_transcript_tree(
         section_frames = frames_for_section(
             video_id=video_id,
             frames=frames,
-            wireframe_lookup=wireframe_lookup,
             start=float(start),
             end=float(end),
         )
         section["frames"] = section_frames
-        section["wireframes"] = wireframes_from_frames(section_frames)
     return tree
 
 
@@ -834,7 +824,6 @@ def frames_for_section(
     *,
     video_id: str,
     frames: list[VideoFrame],
-    wireframe_lookup: dict[str, dict[str, Any]],
     start: float,
     end: float,
 ) -> list[dict[str, Any]]:
@@ -844,7 +833,6 @@ def frames_for_section(
         if timestamp < start or timestamp > end:
             continue
         filename = frame.object_key.rsplit("/", 1)[-1]
-        frame_stem = filename.rsplit(".", 1)[0]
         item: dict[str, Any] = {
             "id": frame.id,
             "timestamp_seconds": round(timestamp, 3),
@@ -853,65 +841,8 @@ def frames_for_section(
             "object_key": frame.object_key,
             "url": f"/api/videos/{video_id}/frames/{filename}",
         }
-        wireframe = wireframe_lookup.get(f"id:{frame.id}") or wireframe_lookup.get(f"stem:{frame_stem}")
-        if wireframe is not None:
-            item["wireframe"] = {
-                "id": wireframe.get("id"),
-                "object_key": wireframe.get("object_key"),
-                "url": wireframe.get("url") or f"/api/objects/{wireframe.get('object_key')}",
-                "media_type": wireframe.get("media_type"),
-            }
         matched.append(item)
     return matched
-
-
-def map_wireframes_by_frame_ref(wireframes: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
-    result: dict[str, dict[str, Any]] = {}
-    for artifact in wireframes:
-        object_key = str(artifact.get("object_key") or "")
-        if not object_key:
-            continue
-        stem = object_key.rsplit("/", 1)[-1].split(".", 1)[0]
-        stem_key = f"stem:{stem}"
-        if stem_key not in result:
-            result[stem_key] = artifact
-        explicit_frame_id = artifact.get("frame_id")
-        if explicit_frame_id is not None:
-            try:
-                id_key = f"id:{int(explicit_frame_id)}"
-            except (TypeError, ValueError):
-                id_key = ""
-            if id_key and id_key not in result:
-                result[id_key] = artifact
-        try:
-            frame_id = int(stem)
-        except ValueError:
-            continue
-        id_key = f"id:{frame_id}"
-        if id_key not in result:
-            result[id_key] = artifact
-    return result
-
-
-def wireframes_from_frames(frames: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    result = []
-    for frame in frames:
-        wireframe = frame.get("wireframe")
-        if not isinstance(wireframe, dict):
-            continue
-        result.append(
-            {
-                "id": wireframe.get("id"),
-                "frame_id": frame.get("id"),
-                "timestamp_seconds": frame.get("timestamp_seconds"),
-                "timestamp_time": frame.get("timestamp_time"),
-                "source_frame_object_key": frame.get("object_key"),
-                "object_key": wireframe.get("object_key"),
-                "url": wireframe.get("url"),
-                "media_type": wireframe.get("media_type"),
-            }
-        )
-    return result
 
 
 def matching_source_chunks(source_segments: list[dict[str, Any]], start: float, end: float) -> list[int]:

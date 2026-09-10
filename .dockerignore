@@ -34,3 +34,6 @@ mobileclip2_b.ts
 *.temp
 .DS_Store
 Thumbs.db
+
+static/node_modules
+static/coverage

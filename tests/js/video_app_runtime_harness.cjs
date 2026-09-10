@@ -1,247 +1,66 @@
-const assert = require("node:assert/strict");
-const fs = require("node:fs");
-const vm = require("node:vm");
+const assert = require('node:assert/strict');
+const path = require('node:path');
+const { pathToFileURL } = require('node:url');
 
-const scenario = process.argv[2];
-const frontendPath = process.argv[3];
-const TASK_ID = "123e4567e89b42d3a456426614174000";
-
-class FakeClassList {
-  constructor() {
-    this.values = new Set();
-  }
-
-  add(...names) {
-    names.forEach((name) => this.values.add(name));
-  }
-
-  remove(...names) {
-    names.forEach((name) => this.values.delete(name));
-  }
-
-  toggle(name, force) {
-    if (force === undefined) force = !this.values.has(name);
-    if (force) this.values.add(name);
-    else this.values.delete(name);
-    return force;
-  }
-
-  contains(name) {
-    return this.values.has(name);
-  }
-}
-
-class FakeElement {
-  constructor(id = "") {
-    this.id = id;
-    this.value = "";
-    this.textContent = "";
-    this.innerHTML = "";
-    this.dataset = {};
-    this.style = {};
-    this.classList = new FakeClassList();
-    this.listeners = {};
-  }
-
-  addEventListener(name, listener) {
-    this.listeners[name] = listener;
-  }
-
-  click() {}
-  querySelectorAll() { return []; }
-  appendChild() {}
-}
-
-class FakeFormData {
-  constructor() {
-    this.values = new Map();
-  }
-
-  append(name, value) {
-    this.values.set(name, value);
-  }
-}
-
-class FakeXMLHttpRequest {
-  static instances = [];
-
-  constructor() {
-    this.upload = {};
-    this.status = 0;
-    this.responseText = "";
-    FakeXMLHttpRequest.instances.push(this);
-  }
-
-  open(method, url) {
-    this.method = method;
-    this.url = url;
-  }
-
-  send(body) {
-    this.body = body;
-  }
-
-  async respond(status, payload = {}) {
-    this.status = status;
-    this.responseText = typeof payload === "string" ? payload : JSON.stringify(payload);
-    return this.onload?.();
-  }
-}
-
-class FakeResponse {
-  constructor(status, payload) {
-    this.status = status;
-    this.ok = status >= 200 && status < 300;
-    this.payload = payload;
-  }
-
-  async json() { return this.payload; }
-  async text() {
-    return typeof this.payload === "string" ? this.payload : JSON.stringify(this.payload ?? {});
-  }
-}
-
-const elements = new Map();
-function element(id) {
-  if (!elements.has(id)) elements.set(id, new FakeElement(id));
-  return elements.get(id);
-}
-
-let nextTimerId = 1;
-const timers = new Map();
-function scheduleTimer(callback, milliseconds) {
-  const id = nextTimerId++;
-  timers.set(id, { callback, milliseconds });
-  return id;
-}
-function clearTimer(id) { timers.delete(id); }
-async function runTimer(milliseconds) {
-  const entry = [...timers.entries()].find(([, timer]) => timer.milliseconds === milliseconds);
-  assert.ok(entry, `expected a ${milliseconds}ms timer`);
-  const [id, timer] = entry;
-  timers.delete(id);
-  await timer.callback();
-  await Promise.resolve();
-}
-
-let fetchHandler = async () => new FakeResponse(500, { detail: "unexpected fetch" });
-const quietConsole = { log() {}, warn() {}, error() {} };
-const context = {
-  console: quietConsole,
-  document: {
-    body: new FakeElement("body"),
-    getElementById: element,
-    querySelectorAll: () => [],
-    querySelector: () => null,
-    createElement: (tag) => new FakeElement(tag),
-  },
-  FormData: FakeFormData,
-  XMLHttpRequest: FakeXMLHttpRequest,
-  fetch: (...args) => fetchHandler(...args),
-  setTimeout: scheduleTimer,
-  clearTimeout: clearTimer,
-  setInterval: scheduleTimer,
-  clearInterval: clearTimer,
-  crypto: { randomUUID: () => TASK_ID },
-  navigator: {},
-};
-context.window = context;
-context.globalThis = context;
-vm.createContext(context);
-
-let source = fs.readFileSync(frontendPath, "utf8").replace(/^\uFEFF/, "");
-const bootstrapIndex = source.lastIndexOf("\nbootstrapVideoApp().catch");
-assert.notEqual(bootstrapIndex, -1, "frontend bootstrap marker changed");
-source = source.slice(0, bootstrapIndex);
-source += `\n;globalThis.__testHooks = {
-  state,
-  uploadFile,
-  updateVideoInState,
-  shouldIgnoreVideoUpdate,
-};`;
-vm.runInContext(source, context, { filename: frontendPath });
-
-const hooks = context.__testHooks;
-
-function video(status, updatedAt, overrides = {}) {
-  return {
-    id: TASK_ID,
-    filename: "demo.mp4",
-    title: "demo",
-    status,
-    current_stage: status,
-    updated_at: updatedAt,
-    ...overrides,
+(async () => {
+  const { createUploadController } = await import(pathToFileURL(path.resolve(process.argv[3])));
+  const { mergeVideo, shouldIgnoreVideoUpdate } = await import(pathToFileURL(path.resolve('static/assets/js/utils/video.js')));
+  const scenario = process.argv[2];
+  const id = '123e4567e89b42d3a456426614174000';
+  const job = (status, at = '2026-09-10T01:00:00') => ({ id, status, current_stage: status, updated_at: at });
+  const state = {}, videos = [], timers = new Map(), responses = []; let timerId = 0, xhr;
+  class Form { constructor() { this.values = new Map(); } append(k,v) { this.values.set(k,v); } }
+  const controller = createUploadController({
+    onChange: patch => Object.assign(state, patch), onVideo: video => mergeVideo(videos, video),
+    crypto: { randomUUID: () => '123e4567-e89b-42d3-a456-426614174000' }, Form,
+    schedule: (fn, delay) => { timers.set(++timerId, {fn,delay}); return timerId; }, cancel: id => timers.delete(id),
+    fetchImpl: async () => responses.shift() || { status:404, ok:false },
+    xhrFactory: () => (xhr = { upload: {}, open(method,url) { this.method=method; this.url=url; }, send(body) {this.body=body;}, abort() {} }),
+  });
+  const tick = async response => {
+    if (response) responses.push({ status: 200, ok: true, json: async () => response });
+    const [key, {fn}] = timers.entries().next().value; timers.delete(key); await fn();
   };
-}
-
-function configureUploadFetch(task) {
-  fetchHandler = async (url) => {
-    if (url === `/api/videos/${TASK_ID}`) return new FakeResponse(200, task);
-    if (url === `/api/videos/${TASK_ID}/transcript`) return new FakeResponse(200, { transcript: null });
-    if (url === "/api/videos") return new FakeResponse(200, [task]);
-    return new FakeResponse(404, { detail: "not found" });
-  };
-}
-
-async function run() {
-  if (scenario === "stale-update") {
-    const latest = video("completed", "2026-08-27T10:00:02.000000");
-    const stale = video("processing", "2026-08-27T10:00:01.000000");
-    hooks.state.videos = [latest];
-    assert.equal(hooks.updateVideoInState(stale), false);
-    assert.equal(hooks.state.videos[0].status, "completed");
-    assert.equal(hooks.updateVideoInState({ filename: "missing-id.mp4" }), false);
-    return;
+  const post = (status, payload) => { xhr.status = status; xhr.responseText = JSON.stringify(payload); xhr.onload(); };
+  if (scenario === 'stale-update') {
+    assert.equal(mergeVideo(videos, job('completed', '2026-09-10T01:00:02')), true);
+    assert.equal(mergeVideo(videos, job('processing', '2026-09-10T01:00:01')), false);
+    assert.equal(videos[0].status, 'completed');
+    assert.equal(shouldIgnoreVideoUpdate(job('completed'), job('processing')), true);
+  } else if (scenario === 'reparse-update') {
+    mergeVideo(videos, job('completed'));
+    assert.equal(mergeVideo(videos, job('processing', '2026-09-10T01:01:00')), true);
+    assert.equal(videos[0].status, 'processing');
+  } else {
+    controller.start({ name: 'operation.mp4', size: 1200, type: 'video/mp4' });
+    assert.equal(xhr.method, 'POST'); assert.equal(xhr.url, '/api/videos/upload-and-parse');
+    assert.equal(xhr.body.values.get('task_id'), id);
+    assert.throws(() => controller.start({ name: 'second.mp4', size: 5, type: 'video/mp4' }));
+    if (scenario === 'late-504') {
+      await tick(job('completed')); assert.equal(state.busy, false);
+      post(504, {}); assert.equal(state.error, ''); assert.equal(state.percent, 100); assert.equal(timers.size, 0);
+    } else if (scenario === 'collision-409') {
+      post(409, {detail:'task conflict'}); assert.equal(state.busy, false); assert.match(state.error, /冲突/); assert.equal(timers.size, 0);
+    } else if (scenario === 'collision-inflight') {
+      let resolveJob;
+      responses.push({status:200,ok:true,json:()=>new Promise(resolve => {resolveJob=resolve;})});
+      const pending=tick(); await Promise.resolve();
+      post(409, {detail:'collision'}); resolveJob(job('completed')); await pending;
+      assert.equal(state.registered,false); assert.equal(videos.length,0); assert.match(state.error,/冲突/);
+    } else if (scenario === 'post-failed-job') {
+      post(500, {job:job('processing'),error:{message:'模型处理失败'}});
+      assert.equal(state.busy,false); assert.equal(videos[0].status,'failed'); assert.match(state.error,/模型处理失败/);
+    } else if (scenario === 'temporary-404') {
+      await tick(); assert.equal(state.busy, true); assert.equal(state.registered, false);
+      assert.equal([...timers.values()][0].delay, 2000);
+      await tick(job('processing')); assert.equal(state.registered, true);
+      await tick(job('completed','2026-09-10T01:02:00')); assert.equal(state.busy,false);
+    } else if (scenario === 'network-timeout') {
+      xhr.onerror(); for (let i=0;i<150;i++) await tick();
+      assert.equal(state.busy,false); assert.match(state.error,/未创建任务/); assert.equal(timers.size,0);
+    } else if (scenario === 'disposed-response') {
+      controller.dispose(); post(200,{job:job('completed')}); assert.equal(videos.length,0); assert.equal(timers.size,0);
+    } else throw new Error('Unknown scenario');
   }
-
-  if (scenario === "reparse-update") {
-    const oldTerminal = video("completed", "2026-08-27T10:00:01.000000");
-    const newProcessing = video("processing", "2026-08-27T10:00:02.000000");
-    hooks.state.videos = [oldTerminal];
-    assert.equal(hooks.updateVideoInState(newProcessing), true);
-    assert.equal(hooks.state.videos[0].status, "processing");
-    assert.equal(hooks.updateVideoInState(oldTerminal), false);
-    assert.equal(hooks.state.videos[0].status, "processing");
-    return;
-  }
-
-  if (scenario === "late-504" || scenario === "collision-409") {
-    const completed = video("completed", "2026-08-27T10:00:02.000000");
-    configureUploadFetch(completed);
-    hooks.uploadFile({ name: "demo.mp4", size: 1024 });
-    const xhr = FakeXMLHttpRequest.instances.at(-1);
-    assert.equal(xhr.method, "POST");
-    assert.equal(xhr.url, "/api/videos/upload-and-parse");
-    assert.equal(xhr.body.values.get("task_id"), TASK_ID);
-
-    await runTimer(0);
-    assert.match(element("uploadInfo").textContent, /上传和解析已全部完成/);
-    assert.equal(hooks.state.activeUploadTaskId, null);
-
-    if (scenario === "late-504") {
-      await xhr.respond(504, "gateway timeout");
-      assert.match(element("uploadInfo").textContent, /上传和解析已全部完成/);
-      assert.equal(hooks.state.videos[0].status, "completed");
-      assert.equal(element("uploadProgressBar").style.width, "100%");
-      return;
-    }
-
-    await xhr.respond(409, { detail: "task_id 已存在" });
-    assert.match(element("uploadInfo").textContent, /上传失败：任务 ID 冲突，请重新上传/);
-    assert.doesNotMatch(element("uploadInfo").textContent, /全部完成/);
-    assert.equal(element("uploadProgressBar").style.width, "0%");
-    assert.equal(hooks.state.activeUploadTaskId, null);
-    assert.equal(hooks.state.activeUploadTaskRevealed, false);
-    assert.equal(hooks.state.activeUploadAttempt, 0);
-    assert.equal(hooks.state.videos[0].status, "completed");
-    return;
-  }
-
-  throw new Error(`unknown scenario: ${scenario}`);
-}
-
-run().catch((error) => {
-  console.error(error);
-  process.exitCode = 1;
-});
+  console.log(`PASS ${scenario}`);
+})().catch(error => { console.error(error); process.exitCode=1; });

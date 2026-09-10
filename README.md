@@ -348,6 +348,10 @@ Authorization: Bearer your-token
 
 注意：浏览器直接打开 `/mcp` 看不到工具列表是正常的。MCP 工具需要通过支持 MCP 的客户端查看，例如 MCP Inspector、Cursor、Claude Desktop、Claude Code 等。
 
+## 升级已有部署
+
+升级前请备份数据库并停止旧版本实例。视频 API 启动时会执行 `app/db/schema_cleanup.py` 中的幂等结构清理，删除已退役的专用任务表及冗余字段；视频、业务帧筛选状态和历史用量记录保留，对象存储文件不会被批量清理。回滚旧版本前需恢复兼容的数据库结构。
+
 ## Windows 本地运行
 
 要求：
@@ -596,9 +600,7 @@ OBJECT_STORE_SECURE=false
 ```text
 MODEL_API_KEY=
 MODEL_OPENAI_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
-MODEL_DASHSCOPE_BASE_URL=https://dashscope.aliyuncs.com
 QWEN_TEXT_MODEL=qwen3.7-plus
-QWEN_VL_MODEL=qwen3-vl-plus
 ```
 
 ### 本地 ASR

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from sqlalchemy import Boolean, DateTime, Float, Integer, String, Text
+from sqlalchemy import DateTime, Float, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.video import VideoBase
@@ -58,29 +58,12 @@ class VideoFrame(VideoBase):
     height: Mapped[int | None] = mapped_column(Integer, nullable=True)
     size_bytes: Mapped[int] = mapped_column(Integer, default=0)
     caption: Mapped[str] = mapped_column(Text, default="")
-    selected_for_wireframe: Mapped[bool] = mapped_column(Boolean, default=True)
     selection_status: Mapped[str] = mapped_column(String(64), default="pending")
     selection_score: Mapped[float | None] = mapped_column(Float, nullable=True)
     selection_reason: Mapped[str] = mapped_column(Text, default="")
     selection_details_json: Mapped[str] = mapped_column(Text, default="{}")
     matched_section_index: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
-
-
-class WireframeJob(VideoBase):
-    __tablename__ = "wireframe_jobs"
-
-    id: Mapped[str] = mapped_column(String(64), primary_key=True)
-    video_id: Mapped[str] = mapped_column(String(64), index=True)
-    status: Mapped[str] = mapped_column(String(64), default="queued", index=True)
-    progress_percent: Mapped[int] = mapped_column(Integer, default=0)
-    total_frames: Mapped[int] = mapped_column(Integer, default=0)
-    completed_frames: Mapped[int] = mapped_column(Integer, default=0)
-    current_frame_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    error_message: Mapped[str] = mapped_column(Text, default="")
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
-    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class VideoUsageRecord(VideoBase):

@@ -1,0 +1,88 @@
+<section x-data="usagePage" class="h-full min-h-0 flex flex-col page-panel">
+  <div class="page-heading shrink-0">
+<div>
+<h2>用量统计</h2>
+<p>追踪视频解析中的模型调用与 Token 消耗。</p>
+</div>
+<button class="btn-secondary" @click="refresh()" :disabled="loading" aria-label="刷新用量">
+<span class="material-symbols-rounded" aria-hidden="true">refresh</span>
+<span class="hidden sm:inline">刷新</span>
+</button>
+</div>
+  <div class="filter-bar shrink-0">
+    <label class="sr-only" for="usage-model">搜索模型</label>
+<input id="usage-model" class="form-input flex-1 min-w-48" placeholder="搜索模型名称…" x-model.debounce.300ms="query">
+    <label class="sr-only" for="usage-feature">功能</label>
+<select id="usage-feature" class="form-input shrink-0" x-model="feature">
+<option value="">全部功能</option>转写文本</option>
+<option>筛选业务帧</option>
+<option>生成 Markdown</option>
+</select>
+    <label class="sr-only" for="usage-status">完成状态</label>
+<select id="usage-status" class="form-input shrink-0" x-model="status">
+<option value="">全部状态</option>
+<option value="completed">已完成</option>
+<option value="processing">进行中</option>
+<option value="failed">失败</option>
+</select>
+  </div>
+  <div class="flex-1 min-h-0 overflow-auto">
+    <div x-show="loading" class="p-4" role="status">
+<div class="skeleton h-16 mb-2">
+</div>
+<div class="skeleton h-16">
+</div>
+<span class="sr-only">正在加载用量记录</span>
+</div>
+    <div x-show="error && !loading" class="empty-state" role="alert">
+<p x-text="error">
+</p>
+<button @click="refresh()" class="btn-secondary">重试</button>
+</div>
+    <div x-show="!loading && !error && !visible.length" class="empty-state">
+<span class="material-symbols-rounded" aria-hidden="true">monitoring</span>
+<h3>暂无匹配的用量记录</h3>
+<p>解析完成后，用量记录会显示在这里。也可尝试调整筛选条件。</p>
+</div>
+    <table x-show="!loading && !error && visible.length" class="data-table">
+<caption class="sr-only">模型使用记录，时间为北京时间</caption>
+<thead>
+<tr>
+<th>功能名称</th>
+<th>使用模型</th>
+<th class="text-right">消耗 Token</th>
+<th>创建时间（北京时间）</th>
+<th>完成状态</th>
+</tr>
+</thead>
+<tbody>
+<template x-for="item in visible" :key="item.id">
+<tr>
+<td class="font-medium" x-text="item.feature_name">
+</td>
+<td class="font-mono text-xs" x-text="item.model || item.models || '本地流程'">
+</td>
+<td class="font-mono tabular-nums text-right" x-text="number(item.total_tokens)">
+</td>
+<td class="font-mono text-xs whitespace-nowrap text-slate-400" x-text="formatDate(item.created_at)">
+</td>
+<td>
+<span class="badge" :class="tone(item.status)" x-text="item.status_label || item.status">
+</span>
+</td>
+</tr>
+</template>
+</tbody>
+</table>
+  </div>
+  <footer class="shrink-0 border-t border-slate-800 px-4 py-3 flex gap-4 text-xs text-slate-400">
+<span>筛选结果 <span class="font-mono text-slate-200" x-text="visible.length">
+</span> 条</span>
+<span>Token 合计 <span class="font-mono text-slate-200" x-text="number(totalTokens)">
+</span>
+</span>
+<span class="ml-auto hidden sm:inline" x-show="updated">更新于 <span class="font-mono" x-text="formatDate(updated)">
+</span>
+</span>
+</footer>
+</section>

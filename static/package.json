@@ -1,0 +1,32 @@
+{
+  "name": "psop-web",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "build:css": "node scripts/build-css.cjs",
+    "watch:css": "node scripts/build-css.cjs --watch",
+    "dev": "node scripts/dev-server.cjs",
+    "test": "node --experimental-vm-modules node_modules/jest/bin/jest.js --runInBand"
+  },
+  "jest": {
+    "testEnvironment": "node",
+    "transform": {},
+    "testMatch": [
+      "**/assets/js/**/__tests__/*.test.js"
+    ]
+  },
+  "dependencies": {
+    "alpinejs": "3.15.3",
+    "codemirror": "^6.0.2",
+    "lightweight-charts": "^5.1.0",
+    "plotly.js-basic-dist-min": "^3.3.1"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "4.1.18",
+    "autoprefixer": "10.4.23",
+    "jest": "30.2.0",
+    "postcss": "8.5.28",
+    "tailwindcss": "4.1.18"
+  }
+}

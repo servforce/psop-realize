@@ -3,7 +3,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from app.core.env import (
-    DEFAULT_MODEL_DASHSCOPE_BASE_URL,
     DEFAULT_MODEL_OPENAI_BASE_URL,
     env,
     env_bool,
@@ -26,13 +25,6 @@ class VideoSettings:
 
     model_api_key: str = ""
     model_openai_base_url: str = DEFAULT_MODEL_OPENAI_BASE_URL
-    model_dashscope_base_url: str = DEFAULT_MODEL_DASHSCOPE_BASE_URL
-
-    wireframe_tool_dir: str = "./tools/qwen-image-wireframe"
-    video_wireframe_generation_enabled: bool = False
-    wireframe_image_model: str = "qwen-image-2.0-pro"
-    wireframe_image_size: str = "auto"
-    wireframe_timeout_seconds: float = 900.0
 
     qwen_text_api_key: str = ""
     qwen_text_base_url: str = DEFAULT_MODEL_OPENAI_BASE_URL
@@ -44,15 +36,6 @@ class VideoSettings:
     qwen_text_max_input_chars: int = 600000
     transcript_structure_model: str = "qwen3.7-plus"
 
-    qwen_vl_api_key: str = ""
-    qwen_vl_base_url: str = DEFAULT_MODEL_OPENAI_BASE_URL
-    qwen_vl_model: str = "qwen3-vl-plus"
-    qwen_vl_temperature: float = 0.0
-    qwen_vl_top_p: float = 0.8
-    qwen_vl_max_tokens: int = 6000
-    qwen_vl_timeout_seconds: float = 300.0
-    qwen_vl_max_input_chars: int = 30000
-
     local_asr_api_base_url: str = ""
     local_asr_language: str = "zh"
     local_asr_timeout_seconds: float = 3600.0
@@ -62,11 +45,6 @@ class VideoSettings:
     video_workdir: str = "./work/videos"
     video_max_upload_bytes: int = 2 * 1024 * 1024 * 1024
     video_max_analyzed_frames: int = 10
-    video_frame_selection_enabled: bool = True
-    video_frame_selection_group_size: int = 8
-    video_frame_selection_max_selected_frames: int = 24
-    video_frame_selection_image_max_side: int = 768
-    video_frame_selection_jpeg_quality: int = 85
     video_frame_selection_min_blur_score: float = 25.0
     video_frame_selection_dark_ratio_threshold: float = 0.9
     video_frame_selection_bright_ratio_threshold: float = 0.9
@@ -103,13 +81,7 @@ class VideoSettings:
         model_openai_base_url = (
             env("MODEL_OPENAI_BASE_URL", "")
             or env("QWEN_TEXT_BASE_URL", "")
-            or env("QWEN_VL_BASE_URL", "")
             or DEFAULT_MODEL_OPENAI_BASE_URL
-        )
-        model_dashscope_base_url = (
-            env("MODEL_DASHSCOPE_BASE_URL", "")
-            or env("DASHSCOPE_BASE_URL", "")
-            or DEFAULT_MODEL_DASHSCOPE_BASE_URL
         )
         qwen_text_api_key = env("QWEN_TEXT_API_KEY", "") or model_api_key
         return cls(
@@ -127,12 +99,6 @@ class VideoSettings:
             object_store_secure=env_bool("OBJECT_STORE_SECURE", False),
             model_api_key=model_api_key,
             model_openai_base_url=model_openai_base_url,
-            model_dashscope_base_url=model_dashscope_base_url,
-            wireframe_tool_dir=env("WIREFRAME_TOOL_DIR", "./tools/qwen-image-wireframe"),
-            video_wireframe_generation_enabled=env_bool("VIDEO_WIREFRAME_GENERATION_ENABLED", False),
-            wireframe_image_model=env("WIREFRAME_IMAGE_MODEL", "qwen-image-2.0-pro"),
-            wireframe_image_size=env("WIREFRAME_IMAGE_SIZE", "auto"),
-            wireframe_timeout_seconds=float(env("WIREFRAME_TIMEOUT_SECONDS", "900")),
             qwen_text_api_key=qwen_text_api_key,
             qwen_text_base_url=env("QWEN_TEXT_BASE_URL", model_openai_base_url),
             qwen_text_model=env("QWEN_TEXT_MODEL", "qwen3.7-plus"),
@@ -142,14 +108,6 @@ class VideoSettings:
             qwen_text_timeout_seconds=float(env("QWEN_TEXT_TIMEOUT_SECONDS", "1800")),
             qwen_text_max_input_chars=int(env("QWEN_TEXT_MAX_INPUT_CHARS", "600000")),
             transcript_structure_model=env("TRANSCRIPT_STRUCTURE_MODEL", "qwen3.7-plus"),
-            qwen_vl_api_key=env("QWEN_VL_API_KEY", "") or model_api_key,
-            qwen_vl_base_url=env("QWEN_VL_BASE_URL", model_openai_base_url),
-            qwen_vl_model=env("QWEN_VL_MODEL", "qwen3-vl-plus"),
-            qwen_vl_temperature=float(env("QWEN_VL_TEMPERATURE", "0")),
-            qwen_vl_top_p=float(env("QWEN_VL_TOP_P", "0.8")),
-            qwen_vl_max_tokens=int(env("QWEN_VL_MAX_TOKENS", "6000")),
-            qwen_vl_timeout_seconds=float(env("QWEN_VL_TIMEOUT_SECONDS", "300")),
-            qwen_vl_max_input_chars=int(env("QWEN_VL_MAX_INPUT_CHARS", "30000")),
             local_asr_api_base_url=env("LOCAL_ASR_API_BASE_URL", ""),
             local_asr_language=env("LOCAL_ASR_LANGUAGE", "zh"),
             local_asr_timeout_seconds=float(env("LOCAL_ASR_TIMEOUT_SECONDS", "3600")),
@@ -158,11 +116,6 @@ class VideoSettings:
             video_workdir=env("VIDEO_WORKDIR", "./work/videos"),
             video_max_upload_bytes=int(env("VIDEO_MAX_UPLOAD_BYTES", str(2 * 1024 * 1024 * 1024))),
             video_max_analyzed_frames=int(env("VIDEO_MAX_ANALYZED_FRAMES", "10")),
-            video_frame_selection_enabled=env_bool("VIDEO_FRAME_SELECTION_ENABLED", True),
-            video_frame_selection_group_size=int(env("VIDEO_FRAME_SELECTION_GROUP_SIZE", "8")),
-            video_frame_selection_max_selected_frames=int(env("VIDEO_FRAME_SELECTION_MAX_SELECTED_FRAMES", "24")),
-            video_frame_selection_image_max_side=int(env("VIDEO_FRAME_SELECTION_IMAGE_MAX_SIDE", "768")),
-            video_frame_selection_jpeg_quality=int(env("VIDEO_FRAME_SELECTION_JPEG_QUALITY", "85")),
             video_frame_selection_min_blur_score=float(env("VIDEO_FRAME_SELECTION_MIN_BLUR_SCORE", "25")),
             video_frame_selection_dark_ratio_threshold=float(env("VIDEO_FRAME_SELECTION_DARK_RATIO_THRESHOLD", "0.9")),
             video_frame_selection_bright_ratio_threshold=float(env("VIDEO_FRAME_SELECTION_BRIGHT_RATIO_THRESHOLD", "0.9")),

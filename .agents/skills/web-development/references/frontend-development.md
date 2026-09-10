@@ -98,7 +98,7 @@ static/
 - Vendor 组件接入建议（必须本地加载，不可 CDN；统一在 `static/index.html` 管理引用）：
   - CodeMirror 6：使用 `static/index.html` 的 `importmap`（将模块映射到 `/node_modules/...`）+ `<script type="module" src="assets/js/vendor/qlibExprEditor.js"></script>`；布局上让编辑器容器 `flex-1 min-h-0`，并确保 `.cm-editor` 可“吃满剩余高度”（优先配合 `h-full`/`min-h-0`）
   - lightweight-charts：从 `node_modules/lightweight-charts/dist/lightweight-charts.standalone.production.js` 加载（须在 `static/index.html` 引用）
-  - Plotly：从 `node_modules/plotly.js/dist/plotly-basic.min.js` 加载（须在 `static/index.html` 引用）
+  - Plotly：从 `node_modules/plotly.js-basic-dist-min/plotly-basic.min.js` 加载（须在 `static/index.html` 引用）
 - 页面资源引用必须为本地资源（不可 CDN），并与目录结构一致（按访问路径约定，不使用 `/static/...` 前缀）：
   ```html
   <!-- 样式（由 npm 构建产物 + 本地字体） -->
@@ -106,7 +106,7 @@ static/
   <link href="assets/css/style.compiled.css" rel="stylesheet" />
 
   <!-- 运行时依赖（全部本地加载，不走外部 CDN） -->
-  <script src="node_modules/plotly.js/dist/plotly-basic.min.js"></script>
+  <script src="node_modules/plotly.js-basic-dist-min/plotly-basic.min.js"></script>
   <script src="node_modules/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
   <script defer src="node_modules/alpinejs/dist/cdn.min.js"></script>
   ```

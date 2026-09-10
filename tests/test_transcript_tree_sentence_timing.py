@@ -78,7 +78,6 @@ def test_normalize_transcript_tree_uses_asr_sentence_time_ranges():
         job=job,
         source_segments=source_segments,
         frames=[],
-        wireframes=[],
         duration_ms=4000,
     )
 

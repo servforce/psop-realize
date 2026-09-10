@@ -57,14 +57,6 @@ def test_build_markdown_from_transcript_tree_renders_structured_sections():
                             "score": 0.91,
                         }
                     ],
-                    "wireframes": [
-                        {
-                            "frame_id": 11,
-                            "timestamp_time": "00:42",
-                            "object_key": "videos/video-1/wireframes/000042000.png",
-                            "url": "/api/objects/videos/video-1/wireframes/000042000.png",
-                        }
-                    ],
                 }
             ],
         },
@@ -92,8 +84,6 @@ def test_build_markdown_from_transcript_tree_renders_structured_sections():
     assert "### 待匹配文本" not in markdown
     assert "### 关键帧" not in markdown
     assert "### 提取后业务帧" not in markdown
-    assert "### 线框图" not in markdown
-    assert "videos/video-1/wireframes/000042000.png" not in markdown
     assert "## 完整转写" not in markdown
 
 
@@ -113,9 +103,8 @@ def test_build_markdown_from_transcript_tree_handles_empty_media():
                     "title": "说明段落",
                     "start_time": "00:00",
                     "end_time": "00:30",
-                    "text": "这一段暂时没有对应的关键帧和线框图。",
+                    "text": "这一段暂时没有对应的业务帧。",
                     "frames": [],
-                    "wireframes": [],
                 }
             ],
         },
@@ -125,7 +114,7 @@ def test_build_markdown_from_transcript_tree_handles_empty_media():
 
     assert "# 空媒体示例" in markdown
     assert "## 1. 说明段落" in markdown
-    assert "这一段暂时没有对应的关键帧和线框图。" in markdown
+    assert "这一段暂时没有对应的业务帧。" in markdown
     assert "### 业务帧\n\n- 无" in markdown
 
 

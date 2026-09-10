@@ -8,10 +8,11 @@ import tempfile
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Literal
 
 from fastapi import APIRouter, BackgroundTasks, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import JSONResponse, PlainTextResponse, Response
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from starlette.concurrency import run_in_threadpool
 
@@ -22,13 +23,12 @@ from app.services.audit import finish_call, logged_call
 from app.services.storage import storage_service
 from app.services.transcript_tree import render_transcript_tree_text
 from app.services.video_repository import VideoJobRepository
+from app.services.video_deletion import VideoDeletionConflict, VideoNotFoundError, delete_video_data
 from app.services.video_parsing import (
-    latest_wireframes_for_video,
     parse_full,
     parse_keyframes,
     parse_markdown,
     parse_transcript,
-    parse_wireframes,
 )
 from app.services.video_export import build_export_package
 from app.services.video_outputs import (
@@ -38,12 +38,6 @@ from app.services.video_outputs import (
     transcript_tree_object_key,
 )
 from app.services.videos import media_type_for_suffix
-from app.services.wireframe_jobs import (
-    create_wireframe_job,
-    get_wireframe_job,
-    latest_wireframe_job,
-    wireframe_job_to_dict,
-)
 router = APIRouter(prefix="/api/videos", tags=["videos"])
 logger = logging.getLogger(__name__)
 SEMANTIC_SECTION_FRAME_DISPLAY_LIMIT = 5
@@ -225,6 +219,8 @@ async def _store_uploaded_video(
                         size_bytes=size,
                         source_bucket=stored.bucket,
                         source_object_key=stored.object_key,
+                        # Combined uploads must not expose a deletable `uploaded` gap.
+                        status="processing" if endpoint == "POST /api/videos/upload-and-parse" else "uploaded",
                     )
                 except IntegrityError as exc:
                     session.rollback()
@@ -238,15 +234,47 @@ async def _store_uploaded_video(
 
 
 @router.get("")
-def list_videos():
+def list_videos(
+    page: int | None = Query(None, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    query: str = Query("", max_length=200),
+    status: Literal["", "uploaded", "queued", "processing", "completed", "completed_with_warnings", "failed", "deleting"] = Query(""),
+    sort: Literal["asc", "desc"] = Query("desc"),
+):
     with VideoSessionLocal() as session:
         repo = VideoJobRepository(session)
-        return [job_to_dict(item, wireframe_count=count_wireframes(session, item.id)) for item in repo.list_jobs()]
+        # Keep the original array response for existing API/MCP consumers.
+        if page is None:
+            return [job_to_dict(item) for item in repo.list_jobs()]
+        jobs, total, page, total_pages = repo.paginate_jobs(
+            page=page, page_size=page_size, query=query, status=status, sort=sort
+        )
+        return {"items": [job_to_dict(item) for item in jobs], "total": total,
+                "page": page, "page_size": page_size, "total_pages": total_pages}
 
 
 @router.get("/{video_id}")
 def get_video(video_id: str):
     return _get_video_job_payload(video_id)
+
+
+@router.delete("/{video_id}")
+def delete_video(video_id: str):
+    try:
+        delete_video_data(
+            video_id, session_factory=VideoSessionLocal,
+            storage=storage_service, default_bucket=settings.object_store_bucket,
+        )
+    except VideoNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="视频任务不存在或已删除") from exc
+    except VideoDeletionConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="视频标识或存储路径不正确，未完成删除") from exc
+    except Exception as exc:
+        logger.exception("video deletion incomplete: video_id=%s", video_id)
+        raise HTTPException(status_code=503, detail="删除未完成，请重试删除；该任务已暂停解析。") from exc
+    return {"id": video_id, "deleted": True}
 
 
 def _get_video_job_payload(video_id: str) -> dict:
@@ -255,7 +283,7 @@ def _get_video_job_payload(video_id: str) -> dict:
         job = repo.get_job(video_id)
         if job is None:
             raise HTTPException(status_code=404, detail="视频任务不存在")
-        payload = job_to_dict(job, wireframe_count=count_wireframes(session, video_id))
+        payload = job_to_dict(job)
         return payload
 
 
@@ -278,8 +306,8 @@ def validate_client_task_id(value: str) -> str:
 
 @router.post("/{video_id}/parse")
 def parse_video(video_id: str, background_tasks: BackgroundTasks, mode: str = Query("full")):
-    if mode not in {"full", "keyframes", "wireframes", "transcript", "markdown"}:
-        raise HTTPException(status_code=400, detail="mode must be full, keyframes, wireframes, transcript, or markdown")
+    if mode not in {"full", "keyframes", "transcript", "markdown"}:
+        raise HTTPException(status_code=400, detail="mode must be full, keyframes, transcript, or markdown")
     with VideoSessionLocal() as session:
         with logged_call(
                 session,
@@ -288,23 +316,13 @@ def parse_video(video_id: str, background_tasks: BackgroundTasks, mode: str = Qu
                 request={"video_id": video_id, "mode": mode},
                 video_id=video_id,
         ) as call_id:
-            job = session.get(VideoJob, video_id)
+            job = session.scalar(select(VideoJob).where(VideoJob.id == video_id).with_for_update())
             if job is None:
                 raise HTTPException(status_code=404, detail="视频任务不存在")
-            if mode == "wireframes":
-                if job.frame_count <= 0:
-                    raise HTTPException(status_code=400, detail="视频还没有关键帧，请先解析关键帧")
-                wireframe_job = create_wireframe_job(video_id)
-                refreshed_wireframe_job = get_wireframe_job(wireframe_job.id) or wireframe_job
-                background_tasks.add_task(run_video_parse_job, video_id, mode, wireframe_job.id)
-                result = {
-                    "video_id": video_id,
-                    "mode": mode,
-                    "job": job_to_dict(job, wireframe_count=count_wireframes(session, video_id)),
-                    "wireframe_job": wireframe_job_to_dict(refreshed_wireframe_job),
-                }
-                finish_call(session, call_id, result)
-                return result
+            if job.status == "deleting":
+                raise HTTPException(status_code=409, detail="该视频正在删除或等待重试删除，不能启动解析。")
+            if job.status in {"queued", "processing"}:
+                raise HTTPException(status_code=409, detail="视频任务正在处理中，请等待任务结束。")
             if mode == "full":
                 job.status = "processing"
                 job.current_stage = "transcribing_asr"
@@ -316,7 +334,7 @@ def parse_video(video_id: str, background_tasks: BackgroundTasks, mode: str = Qu
                 session.commit()
                 session.refresh(job)
                 background_tasks.add_task(run_video_parse_job, video_id, mode)
-                result = {"video_id": video_id, "mode": mode, "job": job_to_dict(job, wireframe_count=count_wireframes(session, video_id))}
+                result = {"video_id": video_id, "mode": mode, "job": job_to_dict(job)}
                 finish_call(session, call_id, result)
                 return result
             if mode == "keyframes":
@@ -330,7 +348,7 @@ def parse_video(video_id: str, background_tasks: BackgroundTasks, mode: str = Qu
                 session.commit()
                 session.refresh(job)
                 background_tasks.add_task(run_video_parse_job, video_id, mode)
-                result = {"video_id": video_id, "mode": mode, "job": job_to_dict(job, wireframe_count=count_wireframes(session, video_id))}
+                result = {"video_id": video_id, "mode": mode, "job": job_to_dict(job)}
                 finish_call(session, call_id, result)
                 return result
             job.status = "processing"
@@ -343,26 +361,24 @@ def parse_video(video_id: str, background_tasks: BackgroundTasks, mode: str = Qu
             session.commit()
             session.refresh(job)
             background_tasks.add_task(run_video_parse_job, video_id, mode)
-            result = {"video_id": video_id, "mode": mode, "job": job_to_dict(job, wireframe_count=count_wireframes(session, video_id))}
+            result = {"video_id": video_id, "mode": mode, "job": job_to_dict(job)}
             finish_call(session, call_id, result)
             return result
 
 
-def run_video_parse_job(video_id: str, mode: str, wireframe_job_id: str | None = None) -> None:
+def run_video_parse_job(video_id: str, mode: str) -> None:
     with VideoSessionLocal() as session:
         with logged_call(
             session,
             interface_type="background",
             tool_or_endpoint="video_parse_job",
-            request={"video_id": video_id, "mode": mode, "wireframe_job_id": wireframe_job_id},
+            request={"video_id": video_id, "mode": mode},
             video_id=video_id,
         ) as call_id:
             if mode == "full":
                 parse_full(video_id)
             elif mode == "keyframes":
                 parse_keyframes(video_id)
-            elif mode == "wireframes":
-                parse_wireframes(video_id, wireframe_job_id=wireframe_job_id)
             elif mode == "transcript":
                 parse_transcript(video_id)
             elif mode == "markdown":
@@ -376,10 +392,7 @@ def run_video_parse_job(video_id: str, mode: str, wireframe_job_id: str | None =
             if job is None:
                 result = {"video_id": video_id, "mode": mode, "job": None}
             else:
-                result = {"video_id": video_id, "mode": mode, "job": job_to_dict(job, wireframe_count=count_wireframes(session, video_id))}
-            if wireframe_job_id:
-                wireframe_job = get_wireframe_job(wireframe_job_id)
-                result["wireframe_job"] = wireframe_job_to_dict(wireframe_job) if wireframe_job is not None else None
+                result = {"video_id": video_id, "mode": mode, "job": job_to_dict(job)}
             finish_call(session, call_id, result)
 
 
@@ -490,47 +503,6 @@ def get_frame(video_id: str, filename: str):
     return Response(content=content, media_type=media_type)
 
 
-@router.get("/{video_id}/wireframes/jobs/latest")
-def get_latest_wireframe_job(video_id: str):
-    job = latest_wireframe_job(video_id)
-    if job is None:
-        return {"video_id": video_id, "job": None}
-    return {"video_id": video_id, "job": wireframe_job_to_dict(job)}
-
-
-@router.get("/{video_id}/wireframes/jobs/{job_id}")
-def get_video_wireframe_job(video_id: str, job_id: str):
-    job = get_wireframe_job(job_id)
-    if job is None or job.video_id != video_id:
-        raise HTTPException(status_code=404, detail="线框图任务不存在")
-    return {"video_id": video_id, "job": wireframe_job_to_dict(job)}
-
-
-@router.get("/{video_id}/wireframes")
-def list_wireframes(video_id: str):
-    with VideoSessionLocal() as session:
-        repo = VideoJobRepository(session)
-        job = repo.get_job(video_id)
-        if job is None:
-            raise HTTPException(status_code=404, detail="视频任务不存在")
-        if not settings.video_wireframe_generation_enabled:
-            tree = read_latest_transcript_tree(session, video_id)
-            section_lookup = transcript_section_lookup(tree)
-            frames = [
-                frame
-                for frame in repo.frames_for_video(video_id)
-                if bool(frame.selected_for_wireframe) and (frame.selection_status or "") == "selected"
-            ]
-            return [selection_preview_to_dict(video_id, item, section_lookup) for item in frames]
-        artifacts = latest_wireframes_for_video(
-            session,
-            video_id,
-            frames=repo.frames_for_video(video_id),
-            bucket=job.source_bucket,
-        )
-        return [wireframe_to_dict(item) for item in artifacts]
-
-
 @router.get("/{video_id}/transcript")
 def get_transcript(video_id: str):
     with VideoSessionLocal() as session:
@@ -591,29 +563,7 @@ def safe_filename(value: str) -> str:
     return name or "video.mp4"
 
 
-def count_wireframes(session, video_id: str) -> int:
-    selected_count = int(
-        session.scalar(
-            select(func.count()).select_from(VideoFrame).where(
-                VideoFrame.video_id == video_id,
-                VideoFrame.selected_for_wireframe == True,
-                VideoFrame.selection_status == "selected",
-            )
-        )
-        or 0
-    )
-    if not settings.video_wireframe_generation_enabled:
-        return selected_count
-    job = latest_wireframe_job(video_id)
-    if job is None:
-        return 0
-    completed = int(job.completed_frames or 0)
-    if job.status == "completed" and completed <= 0:
-        return selected_count
-    return max(0, min(selected_count, completed))
-
-
-def job_to_dict(job: VideoJob, *, wireframe_count: int = 0) -> dict:
+def job_to_dict(job: VideoJob) -> dict:
     public_error_message = job.error_message or ""
     if job.status == "failed":
         public_error_message = "视频解析失败"
@@ -632,7 +582,6 @@ def job_to_dict(job: VideoJob, *, wireframe_count: int = 0) -> dict:
         "error_message": public_error_message,
         "duration_ms": job.duration_ms,
         "frame_count": job.frame_count,
-        "wireframe_count": wireframe_count,
         "source_bucket": job.source_bucket,
         "source_object_key": job.source_object_key,
         "analysis_video_bucket": job.analysis_video_bucket,
@@ -659,7 +608,6 @@ def frame_to_dict(video_id: str, frame: VideoFrame) -> dict:
         "object_key": frame.object_key,
         "url": f"/api/videos/{video_id}/frames/{filename}",
         "caption": frame.caption or "",
-        "selected_for_wireframe": bool(frame.selected_for_wireframe),
         "selection_status": frame.selection_status or "pending",
         "selection_score": frame.selection_score,
         "selection_reason": frame.selection_reason or "",
@@ -687,49 +635,6 @@ def parse_optional_float(value) -> float | None:
         return None
 
 
-def wireframe_to_dict(artifact: dict) -> dict:
-    return {
-        "id": artifact.get("id"),
-        "video_id": artifact.get("video_id"),
-        "bucket": artifact.get("bucket"),
-        "object_key": artifact.get("object_key"),
-        "url": artifact.get("url") or f"/api/objects/{artifact.get('object_key')}",
-        "media_type": artifact.get("media_type") or "image/png",
-        "size_bytes": artifact.get("size_bytes") or 0,
-        "created_at": artifact.get("created_at"),
-    }
-
-
-def selection_preview_to_dict(video_id: str, frame: VideoFrame, section_lookup: dict[int, dict]) -> dict:
-    filename = frame.object_key.rsplit("/", 1)[-1]
-    details = parse_json_object(frame.selection_details_json)
-    matched_section_index = frame.matched_section_index
-    section = section_lookup.get(matched_section_index or -1, {})
-    visual_evidence = details.get("visual_evidence")
-    if not isinstance(visual_evidence, list):
-        visual_evidence = []
-    return {
-        "id": frame.id,
-        "kind": "selection_preview",
-        "video_id": frame.video_id,
-        "frame_id": frame.id,
-        "timestamp_ms": frame.timestamp_ms,
-        "timestamp_seconds": frame.timestamp_seconds,
-        "object_key": frame.object_key,
-        "url": f"/api/videos/{video_id}/frames/{filename}",
-        "source_frame_url": f"/api/videos/{video_id}/frames/{filename}",
-        "selected_for_wireframe": bool(frame.selected_for_wireframe),
-        "selection_status": frame.selection_status or "pending",
-        "selection_score": frame.selection_score,
-        "selection_reason": frame.selection_reason or "",
-        "matched_section_index": matched_section_index,
-        "matched_section_title": section.get("title") or details.get("matched_section_title") or "",
-        "matched_section_text": section.get("text") or "",
-        "visual_evidence": visual_evidence,
-        "wireframe_generation_enabled": False,
-    }
-
-
 def read_latest_transcript_tree(session, video_id: str) -> dict:
     job = session.get(VideoJob, video_id)
     if job is None:
@@ -738,30 +643,6 @@ def read_latest_transcript_tree(session, video_id: str) -> dict:
         return json.loads(read_object_text(job.source_bucket, transcript_tree_object_key(video_id)))
     except Exception:
         return {}
-
-
-def transcript_section_lookup(tree: dict) -> dict[int, dict]:
-    sections = ((tree.get("tree") or {}).get("sections") or []) if isinstance(tree, dict) else []
-    lookup: dict[int, dict] = {}
-    for section in sections:
-        if not isinstance(section, dict):
-            continue
-        try:
-            index = int(section.get("index"))
-        except (TypeError, ValueError):
-            continue
-        lookup[index] = section
-    return lookup
-
-
-def parse_json_object(value: str | None) -> dict:
-    if not value:
-        return {}
-    try:
-        parsed = json.loads(value)
-    except Exception:
-        return {}
-    return parsed if isinstance(parsed, dict) else {}
 
 
 def read_object_text(bucket: str, object_key: str | None) -> str:

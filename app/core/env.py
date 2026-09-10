@@ -5,7 +5,6 @@ from pathlib import Path
 
 
 DEFAULT_MODEL_OPENAI_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
-DEFAULT_MODEL_DASHSCOPE_BASE_URL = "https://dashscope.aliyuncs.com"
 
 
 def load_dotenv(path: str | Path = ".env") -> None:

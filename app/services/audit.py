@@ -174,10 +174,6 @@ def _finish_usage_record(session: object, call_id: str, response: object, *, sta
 def feature_name_for_call(*, interface_type: str, tool_or_endpoint: str, request: object | None) -> str:
     if tool_or_endpoint in {"local_asr.audio_transcriptions", "qwen.chat.completions.transcript_tree"}:
         return "转写文本"
-    if tool_or_endpoint == "qwen.chat.completions.frame_selection":
-        return "筛选业务帧"
-    if tool_or_endpoint == "qwen.image.wireframe":
-        return "线框图"
     if interface_type == "background" and tool_or_endpoint == "video_parse_job":
         mode = (request or {}).get("mode") if isinstance(request, dict) else None
         if mode == "transcript":

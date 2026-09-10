@@ -1,0 +1,138 @@
+@import "tailwindcss";
+@config "../../tailwind.config.js";
+@source "../../index.html";
+@source "../../pages";
+@source "../js";
+
+@theme {
+  --color-slate-50: #fafafa; --color-slate-100: #f5f5f5; --color-slate-200: #e5e5e5;
+  --color-slate-300: #d4d4d4; --color-slate-400: #a3a3a3; --color-slate-500: #858585;
+  --color-slate-600: #525252; --color-slate-700: #404040; --color-slate-800: #2b2b2b;
+  --color-slate-900: #1b1b1b; --color-slate-950: #111111;
+  --font-sans: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif;
+}
+@layer base {
+  [x-cloak] { display: none !important; }
+  html { color-scheme: dark; }
+  button, a, input, select, textarea { -webkit-tap-highlight-color: transparent; }
+  button:not(:disabled), a { cursor: pointer; }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  :focus-visible { outline: 2px solid #fb923c; outline-offset: 3px; }
+  input::placeholder, textarea::placeholder { color: var(--color-slate-400); opacity: 1; }
+  h1,h2,h3 { text-wrap: balance; }
+  button, a { transition: background-color 160ms, color 160ms; }
+}
+@layer components {
+  .sidebar { width: 12rem; }
+  .sidebar-collapsed { width: 3.5rem; }
+  .brand-mark { @apply h-7 w-7 shrink-0 rounded-md bg-orange-500 text-slate-950 font-bold text-lg flex items-center justify-center; }
+  .nav-item { @apply flex items-center gap-3 px-3 py-3 mb-1 rounded-md text-slate-400 hover:bg-slate-900 hover:text-slate-200; }
+  .nav-active { @apply bg-orange-500/10 text-orange-200 hover:bg-orange-500/10 hover:text-orange-200; }
+  .sidebar-collapsed .nav-item { @apply px-2 justify-center; }
+  .sidebar-collapsed > a { @apply px-3; }
+  .page-panel { @apply bg-slate-900/40 overflow-hidden; }
+  .page-heading { @apply flex items-center justify-between gap-4 px-4 py-5 border-b border-slate-800; }
+  .page-heading h2 { @apply text-lg font-semibold; }
+  .page-heading p { @apply text-xs leading-6 text-slate-400 mt-1; }
+  .btn-primary { @apply inline-flex items-center justify-center gap-2 px-3 py-2 rounded-md bg-orange-500 text-slate-950 font-medium hover:bg-orange-400 whitespace-nowrap; }
+  .btn-secondary { @apply inline-flex items-center justify-center gap-2 px-3 py-2 rounded-md border border-slate-700 bg-slate-950/20 text-slate-300 hover:bg-slate-800 whitespace-nowrap; }
+  .btn-danger { @apply inline-flex items-center justify-center gap-2 px-3 py-2 rounded-md bg-rose-500/20 text-rose-200 hover:bg-rose-500/25 whitespace-nowrap; }
+  .btn-quiet { @apply inline-flex items-center gap-2 px-3 py-2 rounded-md text-xs whitespace-nowrap hover:bg-slate-800; }
+  .icon-button { @apply inline-flex items-center justify-center rounded-md w-9 h-9 text-slate-400 hover:bg-slate-800 hover:text-slate-200; }
+  .form-input { @apply max-w-full h-10 rounded-md border border-slate-700 bg-slate-950/30 px-3 text-sm text-slate-200 focus:ring-2 focus:ring-orange-500/30 focus:border-orange-500/30; }
+  .filter-bar { @apply flex items-center gap-2 overflow-x-auto whitespace-nowrap px-4 py-3 border-b border-slate-800; }
+  .badge { @apply inline-flex items-center rounded-full border px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] whitespace-nowrap; }
+  .badge-success { @apply bg-emerald-500/10 text-emerald-200 border-emerald-500/25; }
+  .badge-danger { @apply bg-rose-500/15 text-rose-200 border-rose-500/25; }
+  .badge-warning { @apply bg-amber-500/15 text-amber-200 border-amber-500/25; }
+  .badge-info { @apply bg-sky-500/15 text-sky-200 border-sky-500/25; }
+  .badge-neutral { @apply bg-slate-800/40 text-slate-400 border-slate-700; }
+  .video-table { min-width: 960px; table-layout: fixed; }
+  .video-table :is(th, td) { white-space: nowrap; }
+  .video-table .video-actions { position: sticky; right: 0; text-align: center; background: var(--color-slate-950); }
+  .video-table th.video-actions { z-index: 1; background: var(--color-slate-900); }
+  .delete-file-button:not(:disabled):hover { @apply text-rose-200 bg-rose-500/15; }
+  .empty-state { @apply flex flex-1 flex-col items-center justify-center gap-3 px-6 py-16 text-center text-slate-400 text-xs leading-6; }
+  .empty-state > .material-symbols-rounded { font-size: 36px; margin-bottom: 4px; }
+  .empty-state h3 { @apply text-base text-slate-200 font-medium; }
+  .error-message { @apply text-xs text-rose-300 leading-6 break-words; }
+  .upload-zone { @apply border border-dashed border-slate-700 bg-slate-950/20 px-4 py-10 flex flex-col items-center text-center; }
+  .upload-zone-active { @apply border-orange-400 bg-orange-500/10; }
+  .progress-track { @apply h-1.5 w-full overflow-hidden rounded-full bg-slate-800; }
+  .progress-track > div { @apply h-full bg-orange-400 rounded-full; }
+  .progress-track .progress-complete { @apply bg-emerald-400; }
+  .progress-track .progress-failed { @apply bg-rose-400; }
+  .progress-track .indeterminate { @apply bg-sky-400; width: 40% !important; animation: progress 1.6s ease-in-out infinite; }
+  .score-track { @apply h-1 overflow-hidden bg-slate-800; }
+  .score-track > div { @apply h-full bg-orange-400/70; }
+  .copy-field { @apply flex items-stretch min-w-0; }
+  .copy-field input { @apply h-11 flex-1 min-w-0 rounded-l-md border border-r-0 border-slate-700 bg-slate-950/30 px-3 font-mono text-[11px] text-slate-400 select-all; }
+  .copy-field button { @apply h-11 w-11 shrink-0 rounded-r-md border border-slate-700 bg-slate-950/30 text-slate-400 hover:text-orange-200 inline-flex items-center justify-center; }
+  .result-tab { @apply shrink-0 py-3 text-slate-400 border-b border-transparent hover:text-slate-200; }
+  .result-tab-active { @apply text-orange-200 border-orange-400; }
+  .artifact-toolbar { @apply shrink-0 px-4 py-3 flex justify-between items-center gap-3 border-b border-slate-800 text-xs; }
+  .markdown-pane { @apply relative h-full min-h-0 flex flex-col overflow-hidden; }
+  .markdown-actions { @apply absolute top-3 right-4 z-10 inline-flex items-center gap-1 rounded-md border border-slate-700 bg-slate-950 p-1 text-xs text-slate-300; }
+  .markdown-actions .btn-quiet { @apply min-h-11 sm:min-h-9; }
+  /* Keep the controls outside both scroll surfaces; leave initial text clear of the overlay. */
+  .markdown-pane .markdown-content { @apply flex-1 min-h-0 pt-20 sm:pt-16; }
+  .markdown-pane .markdown-document { @apply sm:pt-4; }
+  /* On wider screens reserve only the top-right corner, not a full-width toolbar row. */
+  .markdown-pane .markdown-document::before { content: ""; @apply hidden sm:block sm:float-right sm:w-52 sm:h-12; }
+  .markdown-pane .markdown-document > :first-child { margin-top: 0; }
+  .text-editor { @apply block w-full rounded-none border-0 px-4 py-3 text-xs font-mono leading-6 bg-slate-900 text-slate-300 resize-none; }
+  .frame-image { @apply block w-full overflow-hidden bg-slate-950 aspect-video; }
+  .frame-image img { @apply w-full h-full object-contain; }
+  .data-table { @apply w-full text-left; }
+  .data-table th { @apply sticky top-0 bg-slate-900 px-4 py-3 text-xs text-slate-400 font-medium border-b border-slate-800 whitespace-nowrap; }
+  .data-table td { @apply px-4 py-4 border-b border-slate-800; }
+  .video-table td { @apply py-2; }
+  .data-table tr:hover td { @apply bg-slate-900/50; }
+  .video-table tr:hover td.video-actions { background: var(--color-slate-900); }
+  .image-dialog { @apply m-auto w-auto max-w-[94vw] max-h-[94dvh] rounded-lg border border-slate-800 bg-slate-900 text-slate-200 p-0; }
+  .image-dialog::backdrop { background: rgb(0 0 0 / .6); }
+  .confirm-dialog { @apply m-auto p-0 w-[28rem] max-w-[calc(100vw-2rem)] max-h-[90dvh] overflow-auto rounded-lg border border-slate-800 bg-slate-900 text-slate-200; }
+  .confirm-dialog::backdrop { background: rgb(0 0 0 / .6); }
+  .upload-drawer {
+    @apply fixed m-0 p-0 border-0 border-l border-slate-800 bg-slate-950 text-slate-200 overflow-hidden;
+    inset: 0 0 0 auto;
+    width: min(100%, 40rem);
+    max-width: 100%;
+    height: 100dvh;
+    max-height: 100dvh;
+  }
+  .upload-drawer[open] { animation: drawer-in 200ms cubic-bezier(.22, 1, .36, 1); }
+  .upload-drawer::backdrop { background: rgb(0 0 0 / .6); animation: backdrop-in 200ms ease-out; }
+  .upload-drawer.is-closing { animation: drawer-out 200ms ease-in both; }
+  .upload-drawer.is-closing::backdrop { animation: backdrop-out 200ms ease-in both; }
+  .upload-drawer .overflow-auto { overscroll-behavior: contain; }
+  .toast { @apply fixed bottom-5 left-1/2 -translate-x-1/2 z-50 rounded-md border border-slate-700 bg-slate-900 px-4 py-3 text-xs shadow-lg max-w-[90vw]; }
+  .skeleton { @apply rounded-sm bg-slate-800/60; animation: skeleton 1.5s ease-in-out infinite; }
+  .markdown-document { @apply px-4 py-4 text-sm leading-7 text-slate-300 break-words; }
+  .markdown-document :is(h1,h2,h3,h4,h5,h6) { @apply font-semibold text-slate-200 mt-5 mb-3; }
+  .markdown-document h1 { @apply text-xl; }
+  .markdown-document h2 { @apply text-lg; }
+  .markdown-document h3 { @apply text-base; }
+  .markdown-document p { @apply my-3; max-width: 75ch; }
+  .markdown-document ul { @apply list-disc pl-6; }
+  .markdown-document ol { @apply list-decimal pl-6; }
+  .markdown-document a { @apply text-orange-200 underline; }
+  .markdown-document pre { @apply overflow-auto bg-slate-900 py-3 font-mono text-xs; }
+  .markdown-document table { @apply w-full text-xs my-4; }
+  .markdown-document :is(th,td) { @apply border-b border-slate-800 px-3 py-2 text-left; }
+  .markdown-document .markdown-table-wrap { overflow-x: auto; }
+  .markdown-document img { max-width: 100%; }
+  .markdown-plain-line { white-space: pre-wrap; overflow-wrap: anywhere; }
+}
+@keyframes progress { from { transform: translateX(-100%); } to { transform: translateX(350%); } }
+@keyframes skeleton { 50% { opacity: .5; } }
+@keyframes drawer-in { from { transform: translateX(100%); } to { transform: translateX(0); } }
+@keyframes drawer-out { from { transform: translateX(0); } to { transform: translateX(100%); } }
+@keyframes backdrop-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes backdrop-out { from { opacity: 1; } to { opacity: 0; } }
+@media (max-width: 767px) {
+  .sidebar { position: fixed; inset: 0 auto 0 0; z-index: 30; visibility: hidden; transform: translateX(-100%); width: 12rem; }
+  .sidebar-open { visibility: visible; transform: translateX(0); }
+  .sidebar-collapsed .nav-item { justify-content: flex-start; }
+}
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; } .progress-track .indeterminate { width: 100% !important; opacity: .7; } }

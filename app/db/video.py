@@ -6,6 +6,7 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
 
 from app.core.video_config import video_settings as settings
+from app.db.schema_cleanup import remove_retired_media_schema
 
 
 logger = logging.getLogger(__name__)
@@ -54,7 +55,6 @@ def _migrate_video_tables() -> None:
             completed_at TIMESTAMP WITH TIME ZONE
         )
         """,
-        "ALTER TABLE video_frames ADD COLUMN IF NOT EXISTS selected_for_wireframe BOOLEAN DEFAULT TRUE",
         "ALTER TABLE video_frames ADD COLUMN IF NOT EXISTS selection_status VARCHAR(64) DEFAULT 'pending'",
         "ALTER TABLE video_frames ADD COLUMN IF NOT EXISTS selection_score FLOAT",
         "ALTER TABLE video_frames ADD COLUMN IF NOT EXISTS selection_reason TEXT DEFAULT ''",
@@ -70,8 +70,6 @@ def _migrate_video_tables() -> None:
         "ALTER TABLE video_jobs ADD COLUMN IF NOT EXISTS analysis_video_size_bytes INTEGER DEFAULT 0",
         "CREATE INDEX IF NOT EXISTS idx_video_jobs_status ON video_jobs (status)",
         "CREATE INDEX IF NOT EXISTS idx_video_frames_video_id ON video_frames (video_id)",
-        "CREATE INDEX IF NOT EXISTS idx_wireframe_jobs_video_id ON wireframe_jobs (video_id)",
-        "CREATE INDEX IF NOT EXISTS idx_wireframe_jobs_status ON wireframe_jobs (status)",
         "CREATE INDEX IF NOT EXISTS idx_video_usage_records_feature_name ON video_usage_records (feature_name)",
         "CREATE INDEX IF NOT EXISTS idx_video_usage_records_status ON video_usage_records (status)",
         "CREATE INDEX IF NOT EXISTS idx_video_usage_records_created_at ON video_usage_records (created_at)",
@@ -82,3 +80,4 @@ def _migrate_video_tables() -> None:
         for statement in statements:
             logger.info("running video DB migration: %s", " ".join(statement.split()))
             connection.execute(text(statement))
+        remove_retired_media_schema(connection)

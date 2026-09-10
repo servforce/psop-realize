@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Iterable
 
-from sqlalchemy import select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from app.models.video import VideoFrame, VideoJob
@@ -27,6 +27,7 @@ class VideoJobRepository:
         size_bytes: int,
         source_bucket: str,
         source_object_key: str,
+        status: str = "uploaded",
     ) -> VideoJob:
         job = VideoJob(
             id=video_id,
@@ -36,7 +37,7 @@ class VideoJobRepository:
             size_bytes=size_bytes,
             source_bucket=source_bucket,
             source_object_key=source_object_key,
-            status="uploaded",
+            status=status,
             progress_percent=0,
             current_stage="uploaded",
         )
@@ -48,6 +49,24 @@ class VideoJobRepository:
     def list_jobs(self, *, limit: int = 30) -> list[VideoJob]:
         statement = select(VideoJob).order_by(VideoJob.created_at.desc()).limit(limit)
         return list(self.session.scalars(statement).all())
+
+    def paginate_jobs(
+        self, *, page: int, page_size: int, query: str = "", status: str = "", sort: str = "desc"
+    ) -> tuple[list[VideoJob], int, int, int]:
+        conditions = []
+        if query.strip():
+            # Treat %, _ and backslashes as literal filename characters, not SQL wildcards.
+            pattern = "%" + query.strip().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+            conditions.append(or_(VideoJob.title.ilike(pattern, escape="\\"), VideoJob.filename.ilike(pattern, escape="\\")))
+        if status:
+            conditions.append(VideoJob.status == status)
+        total = self.session.scalar(select(func.count()).select_from(VideoJob).where(*conditions)) or 0
+        total_pages = max(1, (total + page_size - 1) // page_size)
+        page = min(page, total_pages)
+        # The ID tie-breaker keeps page boundaries stable for identical upload times.
+        order = (VideoJob.created_at.asc(), VideoJob.id.asc()) if sort == "asc" else (VideoJob.created_at.desc(), VideoJob.id.desc())
+        statement = select(VideoJob).where(*conditions).order_by(*order).offset((page - 1) * page_size).limit(page_size)
+        return list(self.session.scalars(statement).all()), total, page, total_pages
 
     def get_job(self, video_id: str) -> VideoJob | None:
         return self.session.get(VideoJob, video_id)

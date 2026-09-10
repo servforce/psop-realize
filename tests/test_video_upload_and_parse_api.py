@@ -35,7 +35,6 @@ def video_api(monkeypatch, tmp_path):
 
     monkeypatch.setattr(videos, "VideoSessionLocal", session_factory)
     monkeypatch.setattr(videos, "settings", replace(videos.settings, video_workdir=str(tmp_path)))
-    monkeypatch.setattr(videos, "count_wireframes", lambda session, video_id: 0)
 
     def fake_upload_file(*, object_key, path, media_type, bucket=None):
         return StoredObject(
@@ -386,7 +385,6 @@ async def test_concurrent_duplicate_task_ids_never_overwrite_source_object(monke
     session_factory = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
     monkeypatch.setattr(videos, "VideoSessionLocal", session_factory)
     monkeypatch.setattr(videos, "settings", replace(videos.settings, video_workdir=str(tmp_path / "work")))
-    monkeypatch.setattr(videos, "count_wireframes", lambda session, video_id: 0)
 
     storage_barrier = threading.Barrier(2)
     storage_lock = threading.Lock()
